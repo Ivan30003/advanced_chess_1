@@ -42,34 +42,6 @@ DIAGONAL_DIRECTIONS = ((1, 1), (1, -1), (-1, 1), (-1, -1))
 ORTHOGONAL_DIRECTIONS = ((1, 0), (-1, 0), (0, 1), (0, -1))
 QUEEN_DIRECTIONS = DIAGONAL_DIRECTIONS + ORTHOGONAL_DIRECTIONS
 
-_CASTLE_KING_FROM = {
-    Color.WHITE: Square.from_name("e1"),
-    Color.BLACK: Square.from_name("e8"),
-}
-_CASTLE_ROOK_FROM = {
-    (Color.WHITE, "K"): Square.from_name("h1"),
-    (Color.WHITE, "Q"): Square.from_name("a1"),
-    (Color.BLACK, "K"): Square.from_name("h8"),
-    (Color.BLACK, "Q"): Square.from_name("a8"),
-}
-_CASTLE_EMPTY = {
-    (Color.WHITE, "K"): ("f1", "g1"),
-    (Color.WHITE, "Q"): ("b1", "c1", "d1"),
-    (Color.BLACK, "K"): ("f8", "g8"),
-    (Color.BLACK, "Q"): ("b8", "c8", "d8"),
-}
-_CASTLE_SAFE = {
-    (Color.WHITE, "K"): ("e1", "f1", "g1"),
-    (Color.WHITE, "Q"): ("e1", "d1", "c1"),
-    (Color.BLACK, "K"): ("e8", "f8", "g8"),
-    (Color.BLACK, "Q"): ("e8", "d8", "c8"),
-}
-_CASTLE_TARGET = {
-    (Color.WHITE, "K"): Square.from_name("g1"),
-    (Color.WHITE, "Q"): Square.from_name("c1"),
-    (Color.BLACK, "K"): Square.from_name("g8"),
-    (Color.BLACK, "Q"): Square.from_name("c8"),
-}
 _CASTLE_RIGHT = {
     (Color.WHITE, "K"): "K",
     (Color.WHITE, "Q"): "Q",
@@ -90,7 +62,7 @@ def is_square_attacked(board: Board, square: Square, by_color: Color) -> bool:
     pawn_rank_delta = -1 if by_color is Color.WHITE else 1
     for file_delta in (-1, 1):
         attacker_square = square.offset(file_delta, pawn_rank_delta)
-        if attacker_square is None:
+        if attacker_square is None or not board.is_on_board(attacker_square):
             continue
         attacker = board.piece_at(attacker_square)
         if (
@@ -102,7 +74,7 @@ def is_square_attacked(board: Board, square: Square, by_color: Color) -> bool:
 
     for file_delta, rank_delta in KNIGHT_OFFSETS:
         attacker_square = square.offset(file_delta, rank_delta)
-        if attacker_square is None:
+        if attacker_square is None or not board.is_on_board(attacker_square):
             continue
         attacker = board.piece_at(attacker_square)
         if (
@@ -114,7 +86,7 @@ def is_square_attacked(board: Board, square: Square, by_color: Color) -> bool:
 
     for file_delta, rank_delta in KING_OFFSETS:
         attacker_square = square.offset(file_delta, rank_delta)
-        if attacker_square is None:
+        if attacker_square is None or not board.is_on_board(attacker_square):
             continue
         attacker = board.piece_at(attacker_square)
         if (
@@ -132,7 +104,7 @@ def is_square_attacked(board: Board, square: Square, by_color: Color) -> bool:
             current = square
             while True:
                 current = current.offset(file_delta, rank_delta)
-                if current is None:
+                if current is None or not board.is_on_board(current):
                     break
                 attacker = board.piece_at(current)
                 if attacker is None:
@@ -157,7 +129,7 @@ def _pinned_squares(board: Board, king_square: Square, color: Color) -> set[Squa
             current = king_square
             while True:
                 current = current.offset(file_delta, rank_delta)
-                if current is None:
+                if current is None or not board.is_on_board(current):
                     break
                 piece = board.piece_at(current)
                 if piece is None:
@@ -180,25 +152,35 @@ def _pinned_squares(board: Board, king_square: Square, color: Color) -> set[Squa
 
 def _pawn_moves(board: Board, state: "GameState", piece: Piece) -> Iterable[Move]:
     color = piece.color
+    board_config = state.config.board
     direction = 1 if color is Color.WHITE else -1
-    start_rank = 1 if color is Color.WHITE else 6
-    last_rank = 7 if color is Color.WHITE else 0
+    start_rank = (
+        board_config.white_pawn_rank
+        if color is Color.WHITE
+        else board_config.black_pawn_rank
+    )
+    last_rank = (
+        board_config.white_promotion_rank
+        if color is Color.WHITE
+        else board_config.black_promotion_rank
+    )
 
     one_step = piece.square.offset(0, direction)
-    if one_step is not None and board.is_empty(one_step):
+    if one_step is not None and board.is_on_board(one_step) and board.is_empty(one_step):
         yield from _pawn_destination_moves(piece, one_step, None, last_rank)
         two_steps = piece.square.offset(0, direction * 2)
         if (
             not piece.has_moved
             and piece.square.rank == start_rank
             and two_steps is not None
+            and board.is_on_board(two_steps)
             and board.is_empty(two_steps)
         ):
             yield make_move(piece, two_steps, is_double=True)
 
     for file_delta in (-1, 1):
         target = piece.square.offset(file_delta, direction)
-        if target is None:
+        if target is None or not board.is_on_board(target):
             continue
         victim = board.piece_at(target)
         if victim is not None and victim.color is not color:
@@ -236,7 +218,7 @@ def _sliding_moves(board: Board, piece: Piece, directions: Iterable[tuple[int, i
         current = piece.square
         while True:
             current = current.offset(file_delta, rank_delta)
-            if current is None:
+            if current is None or not board.is_on_board(current):
                 break
             occupant = board.piece_at(current)
             if occupant is None:
@@ -254,7 +236,7 @@ def _step_moves(
 ) -> Iterable[Move]:
     for file_delta, rank_delta in offsets:
         target = piece.square.offset(file_delta, rank_delta)
-        if target is None:
+        if target is None or not board.is_on_board(target):
             continue
         occupant = board.piece_at(target)
         if occupant is None:
@@ -266,15 +248,31 @@ def _step_moves(
 def _castle_moves(board: Board, state: "GameState", piece: Piece) -> Iterable[Move]:
     if piece.type is not PieceType.KING or piece.has_moved:
         return
-    if piece.square != _CASTLE_KING_FROM[piece.color]:
+    castling = state.config.board.castling_for(piece.color is Color.WHITE)
+    if castling is None or piece.square != castling.king_from:
         return
+
     opponent = piece.color.opposite
-    for side in ("K", "Q"):
+    for side, rook_from, king_to, empty_squares, safe_squares in (
+        (
+            "K",
+            castling.king_side_rook_from,
+            castling.king_side_king_to,
+            castling.king_side_empty,
+            castling.king_side_safe,
+        ),
+        (
+            "Q",
+            castling.queen_side_rook_from,
+            castling.queen_side_king_to,
+            castling.queen_side_empty,
+            castling.queen_side_safe,
+        ),
+    ):
         right = _CASTLE_RIGHT[(piece.color, side)]
         if right not in state.castling_rights:
             continue
-        rook_square = _CASTLE_ROOK_FROM[(piece.color, side)]
-        rook = board.piece_at(rook_square)
+        rook = board.piece_at(rook_from)
         if (
             rook is None
             or rook.color is not piece.color
@@ -282,20 +280,14 @@ def _castle_moves(board: Board, state: "GameState", piece: Piece) -> Iterable[Mo
             or rook.has_moved
         ):
             continue
-        if any(
-            not board.is_empty(Square.from_name(name))
-            for name in _CASTLE_EMPTY[(piece.color, side)]
-        ):
+        if any(not board.is_empty(square) for square in empty_squares):
             continue
-        if any(
-            is_square_attacked(board, Square.from_name(name), opponent)
-            for name in _CASTLE_SAFE[(piece.color, side)]
-        ):
+        if any(is_square_attacked(board, square, opponent) for square in safe_squares):
             continue
         yield Move(
             piece_id=piece.id,
             from_square=piece.square,
-            to_square=_CASTLE_TARGET[(piece.color, side)],
+            to_square=king_to,
             castle=side,
         )
 
@@ -329,6 +321,10 @@ def generate_pseudo_moves(state: "GameState", piece: Piece) -> list[Move]:
 def _apply_move_to_board(board: Board, move: Move) -> Piece:
     """Применяет ход к уже скопированной доске (без счётчиков состояния)."""
 
+    piece = board.piece_at(move.from_square)
+    if piece is None:
+        raise ValueError(f"На клетке {move.from_square.name} нет фигуры")
+
     if move.en_passant:
         board.remove_piece(Square(move.to_square.file, move.from_square.rank))
     elif move.capture is not None:
@@ -337,12 +333,19 @@ def _apply_move_to_board(board: Board, move: Move) -> Piece:
     moved = board.move_piece(move.from_square, move.to_square)
 
     if move.castle is not None:
-        rank = move.from_square.rank
-        if move.castle == "K":
-            rook_from, rook_to = Square(7, rank), Square(5, rank)
-        else:
-            rook_from, rook_to = Square(0, rank), Square(3, rank)
-        board.move_piece(rook_from, rook_to)
+        castling = board.config.castling_for(piece.color is Color.WHITE)
+        if castling is not None:
+            if move.castle == "K":
+                rook_from, rook_to = (
+                    castling.king_side_rook_from,
+                    castling.king_side_rook_to,
+                )
+            else:
+                rook_from, rook_to = (
+                    castling.queen_side_rook_from,
+                    castling.queen_side_rook_to,
+                )
+            board.move_piece(rook_from, rook_to)
 
     if move.promotion is not None:
         moved = moved.promoted_to(move.promotion)

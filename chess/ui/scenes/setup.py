@@ -8,7 +8,7 @@ from chess.core.pieces import BLESSING_INFO, BlessingType, Color
 from chess.ui import theme
 from chess.ui.app import Scene
 from chess.ui.board_view import BoardView
-from chess.ui.setup_config import BOARD_SIZES, SetupConfig
+from chess.ui.setup_config import BOARD_SIZES, PORTAL_COUNTS, SetupConfig
 from chess.ui.widgets import AbilityCard, Button, ConfirmDialog, RadioGroup, Toggle, Tooltip
 
 _ABILITY_ORDER = [
@@ -23,7 +23,7 @@ _ABILITY_ORDER = [
 class SetupScene(Scene):
     def __init__(self, app, config: SetupConfig | None = None) -> None:
         super().__init__(app)
-        self.config = (config or SetupConfig()).stage2_normalized()
+        self.config = (config or SetupConfig()).normalized()
         self.tooltip = Tooltip()
         self._background: pygame.Surface | None = None
         self._background_size = (0, 0)
@@ -36,7 +36,6 @@ class SetupScene(Scene):
             callback=self._on_board_size,
             horizontal=True,
             font_size=19,
-            disabled=[0, 2],
         )
         self.portal_radio = RadioGroup(
             ["0", "1", "2", "3"],
@@ -44,7 +43,6 @@ class SetupScene(Scene):
             callback=self._on_portal_count,
             horizontal=True,
             font_size=19,
-            disabled=[1, 2, 3],
         )
         self.abilities_toggle = Toggle(
             "Способности короля (этап 5)",
@@ -52,7 +50,6 @@ class SetupScene(Scene):
             callback=self._on_abilities_toggle,
             font_size=20,
         )
-        self.abilities_toggle.enabled = False
         self.hints_toggle = Toggle(
             "Подсказки легальных ходов",
             self.config.show_legal_hints,
@@ -136,16 +133,16 @@ class SetupScene(Scene):
     # ------------------------------------------------------------------
 
     def _on_board_size(self, index: int) -> None:
-        if index != 1:
+        if not 0 <= index < len(BOARD_SIZES):
             return
-        self.config.board_size = 8
+        self.config.board_size = BOARD_SIZES[index]
         self._preview.board_size = self.config.board_size
         self._layout()
 
     def _on_portal_count(self, index: int) -> None:
-        if index != 0:
+        if not 0 <= index < len(PORTAL_COUNTS):
             return
-        self.config.portal_count = 0
+        self.config.portal_count = index
 
     def _on_abilities_toggle(self, value: bool) -> None:
         self.config.abilities_enabled = value
@@ -157,7 +154,7 @@ class SetupScene(Scene):
 
     def _start_game(self) -> None:
         if self.config.abilities_ready() and self.config.validation_error() is None:
-            self.app.show_game(self.config.stage2_normalized())
+            self.app.show_game(self.config.normalized())
 
     def _ask_quit(self) -> None:
         self.quit_dialog.open()
@@ -297,7 +294,8 @@ class SetupScene(Scene):
                         return
         if self.abilities_toggle.rect.collidepoint(mouse):
             self.tooltip.set(
-                "Способности короля появятся на этапе 5. На этапе 2 они отключены.",
+                "Способности короля появятся на этапе 5. "
+                "Выбранный параметр сохраняется в состоянии партии.",
                 mouse,
             )
         elif self.hints_toggle.rect.collidepoint(mouse):
@@ -307,7 +305,12 @@ class SetupScene(Scene):
             )
         elif self.board_radio.rect.collidepoint(mouse):
             self.tooltip.set(
-                "На этапе 2 доступна только стандартная доска 8×8.",
+                "Доступны доски 6×6, 8×8 и 10×10.",
+                mouse,
+            )
+        elif self.portal_radio.rect.collidepoint(mouse):
+            self.tooltip.set(
+                "Порталы появятся на этапе 4. Количество сохраняется в состоянии партии.",
                 mouse,
             )
 
@@ -327,7 +330,7 @@ class SetupScene(Scene):
         )
         theme.draw_text(
             surface,
-            "Стандартные шахматы 8×8 · порталы и способности — на следующих этапах",
+            "Доски 6×6, 8×8 и 10×10 · порталы и способности — на следующих этапах",
             16,
             theme.TEXT_MUTED,
             (self.margin, 58),
@@ -366,8 +369,9 @@ class SetupScene(Scene):
         self.hints_toggle.draw(surface)
         theme.draw_text(
             surface,
-            "Этап 2: доска 8×8, без порталов и способностей. "
-            "Другие размеры и порталы появятся на этапах 3–4.",
+            "Этап 3: доступны доски 6×6, 8×8 и 10×10 со всеми стандартными "
+            "правилами и ничьими. Порталы (этап 4) и способности (этап 5) "
+            "пока только сохраняются в настройках.",
             14,
             theme.TEXT_DIM,
             self.info_pos,
@@ -405,8 +409,8 @@ class SetupScene(Scene):
         if not self.config.abilities_enabled:
             theme.draw_text(
                 surface,
-                "Выключены. Способности короля появятся на этапе 5. "
-                "Сейчас доступны только стандартные правила.",
+                "Выключены. Механика способностей короля появится на этапе 5; "
+                "выбранные параметры уже передаются в состояние партии.",
                 14,
                 theme.TEXT_DIM,
                 (self.margin, self.abilities_top + 26),
@@ -461,7 +465,7 @@ class SetupScene(Scene):
         else:
             theme.draw_text(
                 surface,
-                "Готово: стандартная партия 8×8",
+                f"Готово: {self.config.summary}",
                 13,
                 theme.TEXT_DIM,
                 self.footer_message_pos,

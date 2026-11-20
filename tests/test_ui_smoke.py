@@ -16,6 +16,7 @@ import pygame
 import pytest
 
 from chess.core.board import Board
+from chess.core.board_config import BoardConfig, GameConfig
 from chess.core.coords import Square
 from chess.core.game_state import GameState
 from chess.core.pieces import BlessingType, Color, Piece, PieceType
@@ -54,15 +55,37 @@ def _play_scene(scene: GameScene, from_name: str, to_name: str) -> None:
     scene._execute(_find_move(scene.state, from_name, to_name))
 
 
-def _promotion_state() -> GameState:
-    board = Board.empty()
+def _promotion_state(size: int = 8) -> GameState:
+    board = Board.empty(BoardConfig.for_size(size))
     for piece in (
-        Piece("wK-e1", PieceType.KING, Color.WHITE, Square.from_name("e1"), Square.from_name("e1")),
-        Piece("bK-e8", PieceType.KING, Color.BLACK, Square.from_name("e8"), Square.from_name("e8")),
-        Piece("wP-a7", PieceType.PAWN, Color.WHITE, Square.from_name("a7"), Square.from_name("a7")),
+        Piece(
+            "wK-e1",
+            PieceType.KING,
+            Color.WHITE,
+            Square.from_name("e1"),
+            Square.from_name("e1"),
+        ),
+        Piece(
+            "bK-e8",
+            PieceType.KING,
+            Color.BLACK,
+            Square.from_name(f"e{size}"),
+            Square.from_name(f"e{size}"),
+        ),
+        Piece(
+            "wP-a7",
+            PieceType.PAWN,
+            Color.WHITE,
+            Square.from_name(f"a{size - 1}"),
+            Square.from_name(f"a{size - 1}"),
+        ),
     ):
         board.add_piece(piece)
-    return GameState(board=board, side_to_move=Color.WHITE)
+    return GameState(
+        board=board,
+        config=GameConfig.for_size(size),
+        side_to_move=Color.WHITE,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -128,34 +151,39 @@ def test_setup_validation() -> None:
     assert config.abilities_ready()
     assert config.validation_error() is None
 
-    normalized = SetupConfig(
+    normalized = SetupConfig(board_size=7, portal_count=9).normalized()
+    assert normalized.board_size == 8
+    assert normalized.portal_count == 0
+
+    game_config = SetupConfig(
         board_size=10,
         portal_count=2,
         abilities_enabled=True,
-        white_ability=BlessingType.FREEZE,
-    ).stage2_normalized()
-    assert normalized.board_size == 8
-    assert normalized.portal_count == 0
-    assert not normalized.abilities_enabled
-    assert normalized.white_ability is None
+    ).to_game_config()
+    assert game_config.size == 10
+    assert game_config.portal_count == 2
+    assert game_config.abilities_enabled is True
 
 
-def test_setup_is_limited_to_stage_two(app: App) -> None:
+def test_setup_allows_all_stage_three_options(app: App) -> None:
     config = SetupConfig(
         board_size=10,
         portal_count=2,
         abilities_enabled=True,
         white_ability=BlessingType.RESURRECTION,
+        black_ability=BlessingType.FREEZE,
     )
     scene = SetupScene(app, config)
-    assert scene.config.board_size == 8
-    assert scene.config.portal_count == 0
-    assert not scene.config.abilities_enabled
+    assert scene.config.board_size == 10
+    assert scene.config.portal_count == 2
+    assert scene.config.abilities_enabled
     assert scene.start_button.enabled
-    assert not scene.abilities_toggle.enabled
-    assert scene.board_radio.disabled == {0, 2}
-    assert scene.portal_radio.disabled == {1, 2, 3}
-    assert all(not card.enabled for cards in scene.cards.values() for card in cards)
+    assert scene.abilities_toggle.enabled
+    assert scene.board_radio.disabled == set()
+    assert scene.portal_radio.disabled == set()
+    assert all(card.enabled for cards in scene.cards.values() for card in cards)
+    surface = pygame.Surface(theme.WINDOW_DEFAULT_SIZE)
+    scene.draw(surface)
 
 
 def test_setup_board_size_and_preview(app: App) -> None:
@@ -163,14 +191,17 @@ def test_setup_board_size_and_preview(app: App) -> None:
     assert scene._preview.board_size == 8
 
     scene._on_board_size(0)
-    assert scene.config.board_size == 8
-    assert scene._preview.board_size == 8
+    assert scene.config.board_size == 6
+    assert scene._preview.board_size == 6
     scene._on_board_size(2)
+    assert scene.config.board_size == 10
+    assert scene._preview.board_size == 10
+    scene._on_board_size(1)
     assert scene.config.board_size == 8
     assert scene._preview.board_size == 8
 
     scene._on_portal_count(2)
-    assert scene.config.portal_count == 0
+    assert scene.config.portal_count == 2
 
     scene._on_hints_toggle(False)
     assert scene.config.show_legal_hints is False
@@ -186,9 +217,11 @@ def test_navigation_between_scenes(app: App) -> None:
     config = SetupConfig(board_size=10, portal_count=2, abilities_enabled=False)
     app.show_game(config)
     assert isinstance(app.current_scene, GameScene)
-    assert app.current_scene.config.board_size == 8
-    assert app.current_scene.config.portal_count == 0
+    assert app.current_scene.config.board_size == 10
+    assert app.current_scene.config.portal_count == 2
     assert not app.current_scene.config.abilities_enabled
+    assert app.current_scene.state.config.size == 10
+    assert len(app.current_scene.state.board) == 36
     app.show_rules()
     assert isinstance(app.current_scene, RulesScene)
     app.back_from_rules()
@@ -250,27 +283,34 @@ def test_menu_click_flow_and_setup_controls(app: App) -> None:
     setup = app.current_scene
     setup._layout()
     _click(setup, setup.board_radio.item_rects[2].center)
-    assert setup.config.board_size == 8
-    assert setup._preview.board_size == 8
+    assert setup.config.board_size == 10
+    assert setup._preview.board_size == 10
 
     _click(setup, setup.portal_radio.item_rects[2].center)
-    assert setup.config.portal_count == 0
+    assert setup.config.portal_count == 2
 
-    # Переключатель способностей отключён на этапе 2.
+    # Способности включаются, но до выбора обеих сторон старт недоступен.
     toggle = setup.abilities_toggle
     _click(setup, (toggle.rect.right - 28, toggle.rect.centery))
-    assert not setup.config.abilities_enabled
+    assert setup.config.abilities_enabled
+    assert not setup.start_button.enabled
+    setup._select_ability(Color.WHITE, BlessingType.FREEZE)
+    setup._select_ability(Color.BLACK, BlessingType.PASS_THROUGH)
+    assert setup.start_button.enabled
 
     hints = setup.hints_toggle
     _click(setup, (hints.rect.right - 28, hints.rect.centery))
     assert setup.config.show_legal_hints is False
 
-    assert setup.start_button.enabled
     _click(setup, setup.start_button.rect.center)
     assert isinstance(app.current_scene, GameScene)
-    assert app.current_scene.config.board_size == 8
-    assert app.current_scene.config.portal_count == 0
+    assert app.current_scene.config.board_size == 10
+    assert app.current_scene.config.portal_count == 2
+    assert app.current_scene.config.abilities_enabled
     assert app.current_scene.config.show_legal_hints is False
+    assert app.current_scene.state.config.size == 10
+    assert app.current_scene.state.config.portal_count == 2
+    assert app.current_scene.state.config.abilities_enabled
 
 
 def test_menu_escape_opens_quit_dialog(app: App) -> None:
@@ -292,9 +332,79 @@ def test_board_square_mapping() -> None:
     assert view.square_at((0, 0)) is None
 
 
+def test_board_view_scales_for_all_sizes() -> None:
+    for size in (6, 8, 10):
+        view = BoardView(size)
+        view.set_rect(pygame.Rect(0, 0, 800, 800))
+        assert view.square_size <= BoardView.MAX_SQUARE_SIZE
+        assert view.square_at(view.square_rect(0, 0).center) == (0, 0)
+        assert view.square_at(view.square_rect(size - 1, size - 1).center) == (
+            size - 1,
+            size - 1,
+        )
+
+    large_board = BoardView(10)
+    large_board.set_rect(pygame.Rect(0, 0, 800, 800))
+    # На 10×10 клетка должна использовать доступное место, а не быть крошечной.
+    assert large_board.square_size >= 60
+    assert large_board.square_size == 800 // 11
+
+
 # ---------------------------------------------------------------------------
 # Игровой экран
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("size", "piece_count"), [(6, 24), (8, 32), (10, 36)])
+def test_game_scene_renders_each_size(
+    app: App,
+    size: int,
+    piece_count: int,
+) -> None:
+    scene = GameScene(app, SetupConfig(board_size=size))
+    scene._layout()
+    assert scene.board_view.board_size == size
+    assert scene.game_config.size == size
+    assert scene.state.config.size == size
+    assert len(scene.state.board) == piece_count
+    surface = pygame.Surface(app.screen.get_size())
+    scene.update(0.016)
+    scene.draw(surface)
+
+
+def test_game_click_move_on_6x6(app: App) -> None:
+    scene = GameScene(app, SetupConfig(board_size=6))
+    scene._layout()
+    _click(scene, scene.board_view.square_center(4, 1))  # e2
+    assert scene.selected == Square.from_name("e2")
+    assert Square.from_name("e4") in scene.legal_by_target
+    _click(scene, scene.board_view.square_center(4, 3))  # e4
+    assert scene.state.history == ["e2-e4"]
+    assert scene.state.board.piece_at(Square.from_name("e4")).type is PieceType.PAWN
+    assert scene.state.side_to_move is Color.BLACK
+
+
+def test_game_click_move_on_10x10(app: App) -> None:
+    scene = GameScene(app, SetupConfig(board_size=10))
+    scene._layout()
+    _click(scene, scene.board_view.square_center(5, 1))  # f2
+    assert scene.selected == Square.from_name("f2")
+    assert Square.from_name("f4") in scene.legal_by_target
+    _click(scene, scene.board_view.square_center(5, 3))  # f4
+    assert scene.state.history == ["f2-f4"]
+    assert scene.state.board.piece_at(Square.from_name("f4")).type is PieceType.PAWN
+    assert scene.state.side_to_move is Color.BLACK
+
+
+def test_game_draw_result_overlay_draws(app: App) -> None:
+    scene = GameScene(app, SetupConfig())
+    scene.state = scene.state.agree_draw()
+    assert scene.state.result is not None
+    assert scene.state.result.title == "Ничья по соглашению"
+    surface = pygame.Surface(app.screen.get_size())
+    scene.draw(surface)
+    _click(scene, scene.board_view.square_center(4, 1))
+    assert scene.selected is None
 
 
 def test_game_click_select_and_move(app: App) -> None:
@@ -366,6 +476,47 @@ def test_game_promotion_modal_requires_choice(app: App) -> None:
     assert scene.pending_promotion is None
     assert scene.state.board.piece_at(Square.from_name("a8")).type is PieceType.QUEEN
     assert scene.state.history == ["a7-a8=Q"]
+
+
+@pytest.mark.parametrize("size", [6, 10])
+def test_game_promotion_modal_on_6_and_10(app: App, size: int) -> None:
+    scene = GameScene(app, SetupConfig(board_size=size))
+    scene.state = _promotion_state(size)
+    scene._layout()
+    surface = pygame.Surface(app.screen.get_size())
+    scene.draw(surface)
+
+    _click(scene, scene.board_view.square_center(0, size - 2))
+    _click(scene, scene.board_view.square_center(0, size - 1))
+    assert scene.pending_promotion is not None
+    assert len(scene.pending_promotion) == 4
+    scene.draw(surface)
+
+    _click(scene, scene.promotion_rects[PieceType.ROOK].center)
+    target = Square.from_name(f"a{size}")
+    assert scene.pending_promotion is None
+    assert scene.state.board.piece_at(target).type is PieceType.ROOK
+    assert scene.state.history == [f"a{size - 1}-a{size}=R"]
+
+
+def test_game_hover_capture_on_6x6(
+    app: App,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scene = GameScene(app, SetupConfig(board_size=6))
+    scene._layout()
+    _play_scene(scene, "e2", "e4")
+    _play_scene(scene, "a5", "a4")
+
+    _click(scene, scene.board_view.square_center(4, 3))  # e4
+    assert Square.from_name("d5") in scene.legal_by_target
+    monkeypatch.setattr(
+        pygame.mouse,
+        "get_pos",
+        lambda: scene.board_view.square_center(3, 4),
+    )
+    scene.update(0.016)
+    assert scene.hover_capture == (3, 4)
 
 
 def test_game_result_overlay_blocks_board_and_new_game_works(app: App) -> None:

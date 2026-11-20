@@ -9,25 +9,20 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from chess.core.coords import ALL_SQUARES, BOARD_SIZE, Square
+from chess.core.board_config import BoardConfig
+from chess.core.coords import Square
 from chess.core.pieces import Color, Piece, PieceType
-
-_BACK_RANK = [
-    PieceType.ROOK,
-    PieceType.KNIGHT,
-    PieceType.BISHOP,
-    PieceType.QUEEN,
-    PieceType.KING,
-    PieceType.BISHOP,
-    PieceType.KNIGHT,
-    PieceType.ROOK,
-]
 
 
 class Board:
     """Словарь клетка → фигура с удобными операциями."""
 
-    def __init__(self, pieces: dict[Square, Piece] | None = None) -> None:
+    def __init__(
+        self,
+        pieces: dict[Square, Piece] | None = None,
+        config: BoardConfig | None = None,
+    ) -> None:
+        self.config = config or BoardConfig.for_size(8)
         self.pieces: dict[Square, Piece] = dict(pieces or {})
 
     # ------------------------------------------------------------------
@@ -35,20 +30,32 @@ class Board:
     # ------------------------------------------------------------------
 
     @classmethod
-    def empty(cls) -> "Board":
-        return cls()
+    def empty(cls, config: BoardConfig | int | None = None) -> "Board":
+        return cls(config=_resolve_board_config(config))
 
     @classmethod
-    def initial(cls) -> "Board":
-        """Стандартная начальная расстановка белых снизу."""
+    def initial(cls, config: BoardConfig | int | None = None) -> "Board":
+        """Начальная расстановка выбранного размера."""
 
-        board = cls()
-        for file, piece_type in enumerate(_BACK_RANK):
+        board_config = _resolve_board_config(config)
+        board = cls(config=board_config)
+        size = board_config.size
+        for file, piece_type in enumerate(board_config.back_rank):
+            if piece_type is None:
+                continue
             board._place(piece_type, Color.WHITE, Square(file, 0))
-            board._place(piece_type, Color.BLACK, Square(file, 7))
-        for file in range(BOARD_SIZE):
-            board._place(PieceType.PAWN, Color.WHITE, Square(file, 1))
-            board._place(PieceType.PAWN, Color.BLACK, Square(file, 6))
+            board._place(piece_type, Color.BLACK, Square(file, size - 1))
+        for file in range(size):
+            board._place(
+                PieceType.PAWN,
+                Color.WHITE,
+                Square(file, board_config.white_pawn_rank),
+            )
+            board._place(
+                PieceType.PAWN,
+                Color.BLACK,
+                Square(file, board_config.black_pawn_rank),
+            )
         return board
 
     def _place(
@@ -71,6 +78,7 @@ class Board:
         """Быстрая копия: фигуры неизменяемые, достаточно скопировать словарь."""
 
         copy = Board.__new__(Board)
+        copy.config = self.config
         copy.pieces = dict(self.pieces)
         return copy
 
@@ -83,6 +91,9 @@ class Board:
 
     def is_empty(self, square: Square) -> bool:
         return square not in self.pieces
+
+    def is_on_board(self, square: Square) -> bool:
+        return self.config.is_on_board(square)
 
     def add_piece(self, piece: Piece) -> None:
         self.pieces[piece.square] = piece
@@ -134,4 +145,12 @@ class Board:
         return len(self.pieces)
 
     def squares(self) -> tuple[Square, ...]:
-        return ALL_SQUARES
+        return self.config.squares()
+
+
+def _resolve_board_config(config: BoardConfig | int | None) -> BoardConfig:
+    if config is None:
+        return BoardConfig.for_size(8)
+    if isinstance(config, int):
+        return BoardConfig.for_size(config)
+    return config

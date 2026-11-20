@@ -30,6 +30,9 @@ class PortalMarker:
 class BoardView:
     """Рисует доску произвольного размера и опциональные элементы."""
 
+    # На маленьких досках не позволяем клеткам разрастаться на всю панель.
+    MAX_SQUARE_SIZE = 96
+
     def __init__(self, board_size: int = 8) -> None:
         self.board_size = board_size
         self.rect = pygame.Rect(0, 0, 1, 1)
@@ -50,7 +53,10 @@ class BoardView:
     def _recalculate(self) -> None:
         n = self.board_size
         available = max(1, min(self.rect.w, self.rect.h))
-        self.square_size = max(8, available // (n + 1))
+        self.square_size = min(
+            self.MAX_SQUARE_SIZE,
+            max(8, available // (n + 1)),
+        )
         board_px = self.square_size * n
         self.origin = (
             self.rect.centerx - board_px // 2,

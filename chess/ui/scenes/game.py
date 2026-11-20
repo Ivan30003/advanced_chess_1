@@ -1,4 +1,4 @@
-"""Игровой экран: стандартная партия 8×8 с hot-seat управлением."""
+"""Игровой экран: партия на доске 6×6, 8×8 или 10×10 с hot-seat управлением."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def _ui_square(square: Square) -> tuple[int, int]:
 
 
 class GameScene(Scene):
-    """Полноценная партия на доске 8×8.
+    """Полноценная партия на выбранной доске.
 
     Состояние хранится в :class:`GameState`; сцена только преобразует клики и
     рисует данные. Вся проверка легальности выполняется в ``chess.core``.
@@ -34,10 +34,10 @@ class GameScene(Scene):
 
     def __init__(self, app, config: SetupConfig) -> None:
         super().__init__(app)
-        # Этап 2 жёстко ограничен доской 8×8 без порталов и способностей.
-        self.config = config.stage2_normalized()
-        self.board_view = BoardView(8)
-        self.state = GameState.initial()
+        self.config = config.normalized()
+        self.game_config = self.config.to_game_config()
+        self.board_view = BoardView(self.game_config.size)
+        self.state = GameState.initial(self.game_config)
         self.selected: Square | None = None
         self.legal_by_target: dict[Square, list[Move]] = {}
         self.hover_capture: tuple[int, int] | None = None
@@ -66,7 +66,7 @@ class GameScene(Scene):
     # ------------------------------------------------------------------
 
     def new_game(self) -> None:
-        self.state = GameState.initial()
+        self.state = GameState.initial(self.game_config)
         self._clear_selection()
         self.pending_promotion = None
         self.log_scroll = 0.0
@@ -163,7 +163,7 @@ class GameScene(Scene):
 
         px = self.panel_rect.left + 18
         inner_w = self.panel_rect.w - 36
-        self.status_rect = pygame.Rect(px, self.panel_rect.top + 54, inner_w, 64)
+        self.status_rect = pygame.Rect(px, self.panel_rect.top + 82, inner_w, 64)
 
         button_h = 40
         gap = 8
@@ -341,7 +341,7 @@ class GameScene(Scene):
         )
         theme.draw_text(
             surface,
-            "Стандартные шахматы 8×8 · hot-seat · клик-клик",
+            f"Доска {self.game_config.size}×{self.game_config.size} · hot-seat · клик-клик",
             16,
             theme.TEXT_MUTED,
             (self.margin, 58),
@@ -415,6 +415,23 @@ class GameScene(Scene):
             (x, self.panel_rect.top + 18),
             bold=True,
         )
+        theme.draw_text(
+            surface,
+            self.config.summary,
+            12,
+            theme.TEXT_DIM,
+            (x, self.panel_rect.top + 46),
+            max_width=self.panel_rect.w - 36,
+        )
+        if self.config.portal_count or self.config.abilities_enabled:
+            theme.draw_text(
+                surface,
+                "Будет добавлено на следующих этапах.",
+                11,
+                theme.TEXT_DIM,
+                (x, self.panel_rect.top + 62),
+                max_width=self.panel_rect.w - 36,
+            )
 
         is_result = self.state.result is not None
         in_check = not is_result and is_in_check(self.state, self.state.side_to_move)
