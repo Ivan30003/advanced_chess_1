@@ -150,7 +150,7 @@ class MenuScene(Scene):
 
         theme.draw_text(
             surface,
-            "по очереди · 6×6 / 8×8 / 10×10 · порталы · способности короля",
+            "hot-seat · стандартные шахматы 8×8 · этап 2",
             max(12, min(16, width // 80)),
             theme.TEXT_DIM,
             (width // 2, height - 28),

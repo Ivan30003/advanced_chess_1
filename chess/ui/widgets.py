@@ -216,6 +216,7 @@ class RadioGroup(Widget):
         font_size: int = 20,
         gap: int = 8,
         tooltips: Sequence[str] | None = None,
+        disabled: Sequence[int] | None = None,
     ) -> None:
         super().__init__(rect)
         self.options = list(options)
@@ -225,9 +226,13 @@ class RadioGroup(Widget):
         self.font_size = font_size
         self.gap = gap
         self.tooltips = list(tooltips) if tooltips else []
+        self.disabled: set[int] = set(disabled or ())
         self.item_rects: list[pygame.Rect] = []
         self.hovered_index: int | None = None
         self._recalculate_items()
+
+    def is_disabled(self, index: int) -> bool:
+        return index in self.disabled or not self.enabled
 
     def set_rect(self, rect: pygame.Rect) -> None:
         super().set_rect(rect)
@@ -261,12 +266,14 @@ class RadioGroup(Widget):
         if event.type == pygame.MOUSEMOTION:
             self.hovered_index = None
             for index, item in enumerate(self.item_rects):
-                if item.collidepoint(event.pos):
+                if index not in self.disabled and item.collidepoint(event.pos):
                     self.hovered_index = index
                     break
             return False
         if event.type == pygame.MOUSEBUTTONUP and event.button == 1 and self.enabled:
             for index, item in enumerate(self.item_rects):
+                if index in self.disabled:
+                    continue
                 if item.collidepoint(event.pos):
                     self.selected = index
                     if self.callback is not None:
@@ -280,10 +287,13 @@ class RadioGroup(Widget):
         for index, item in enumerate(self.item_rects):
             active = index == self.selected
             hovered = index == self.hovered_index
-            if not self.enabled:
+            option_disabled = index in self.disabled
+            if not self.enabled or option_disabled:
                 bg = theme.BUTTON_DISABLED
                 border = theme.BORDER_SOFT
                 text_color = theme.TEXT_DIM
+                if active:
+                    border = theme.BORDER
             elif active:
                 bg = theme.ACCENT
                 border = theme.ACCENT_HOVER

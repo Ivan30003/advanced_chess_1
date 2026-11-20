@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import pygame
@@ -35,6 +36,12 @@ class BoardView:
         self.square_size = 8
         self.board_rect = pygame.Rect(0, 0, 8, 8)
         self.origin = (0, 0)
+        self.pulse_phase = 0.0
+
+    def update(self, dt: float) -> None:
+        """Продвигает фазу пульсации красного свечения цели атаки."""
+
+        self.pulse_phase = (self.pulse_phase + dt * 3.2) % (math.tau)
 
     def set_rect(self, rect: pygame.Rect) -> None:
         self.rect = pygame.Rect(rect)
@@ -106,9 +113,24 @@ class BoardView:
             self._draw_legal_targets(surface, legal_targets)
 
         if hover_capture is not None:
-            rect = self.square_rect(*hover_capture).inflate(-6, -6)
-            theme.draw_soft_glow(surface, rect, theme.DANGER, layers=7, max_alpha=120, spread=12)
-            self._stroke_square(surface, hover_capture, theme.DANGER, 3)
+            pulse = 0.5 + 0.5 * math.sin(self.pulse_phase)
+            rect = self.square_rect(*hover_capture).inflate(-8, -8)
+            theme.draw_soft_glow(
+                surface,
+                rect,
+                theme.DANGER,
+                layers=8,
+                max_alpha=int(95 + 85 * pulse),
+                spread=int(10 + 5 * pulse),
+            )
+            frame = self.square_rect(*hover_capture).inflate(-3, -3)
+            pygame.draw.rect(
+                surface,
+                theme.DANGER,
+                frame,
+                width=3 + int(round(2 * pulse)),
+                border_radius=3,
+            )
 
         if portals:
             for marker in portals:

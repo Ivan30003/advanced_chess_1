@@ -23,7 +23,7 @@ _ABILITY_ORDER = [
 class SetupScene(Scene):
     def __init__(self, app, config: SetupConfig | None = None) -> None:
         super().__init__(app)
-        self.config = config or SetupConfig()
+        self.config = (config or SetupConfig()).stage2_normalized()
         self.tooltip = Tooltip()
         self._background: pygame.Surface | None = None
         self._background_size = (0, 0)
@@ -36,6 +36,7 @@ class SetupScene(Scene):
             callback=self._on_board_size,
             horizontal=True,
             font_size=19,
+            disabled=[0, 2],
         )
         self.portal_radio = RadioGroup(
             ["0", "1", "2", "3"],
@@ -43,11 +44,19 @@ class SetupScene(Scene):
             callback=self._on_portal_count,
             horizontal=True,
             font_size=19,
+            disabled=[1, 2, 3],
         )
         self.abilities_toggle = Toggle(
-            "Способности короля",
+            "Способности короля (этап 5)",
             self.config.abilities_enabled,
             callback=self._on_abilities_toggle,
+            font_size=20,
+        )
+        self.abilities_toggle.enabled = False
+        self.hints_toggle = Toggle(
+            "Подсказки легальных ходов",
+            self.config.show_legal_hints,
+            callback=self._on_hints_toggle,
             font_size=20,
         )
         self.start_button = Button(
@@ -127,21 +136,28 @@ class SetupScene(Scene):
     # ------------------------------------------------------------------
 
     def _on_board_size(self, index: int) -> None:
-        self.config.board_size = BOARD_SIZES[index]
+        if index != 1:
+            return
+        self.config.board_size = 8
         self._preview.board_size = self.config.board_size
         self._layout()
 
     def _on_portal_count(self, index: int) -> None:
-        self.config.portal_count = index
+        if index != 0:
+            return
+        self.config.portal_count = 0
 
     def _on_abilities_toggle(self, value: bool) -> None:
         self.config.abilities_enabled = value
         self._sync_cards()
         self._update_start_state()
 
+    def _on_hints_toggle(self, value: bool) -> None:
+        self.config.show_legal_hints = value
+
     def _start_game(self) -> None:
-        if self.config.abilities_ready():
-            self.app.show_game(self.config)
+        if self.config.abilities_ready() and self.config.validation_error() is None:
+            self.app.show_game(self.config.stage2_normalized())
 
     def _ask_quit(self) -> None:
         self.quit_dialog.open()
@@ -174,7 +190,8 @@ class SetupScene(Scene):
         self.portal_label_pos = (margin, control_y + 88)
         self.portal_radio.set_rect(pygame.Rect(margin, control_y + 116, left_w, 44))
         self.abilities_toggle.set_rect(pygame.Rect(margin, control_y + 180, left_w, 36))
-        self.info_pos = (margin, control_y + 226)
+        self.hints_toggle.set_rect(pygame.Rect(margin, control_y + 220, left_w, 36))
+        self.info_pos = (margin, control_y + 262)
 
         preview_rect = pygame.Rect(
             margin + left_w + 24,
@@ -255,6 +272,7 @@ class SetupScene(Scene):
             self.start_button,
             self.quit_button,
             self.abilities_toggle,
+            self.hints_toggle,
             self.board_radio,
             self.portal_radio,
             *self.cards[Color.WHITE],
@@ -279,7 +297,17 @@ class SetupScene(Scene):
                         return
         if self.abilities_toggle.rect.collidepoint(mouse):
             self.tooltip.set(
-                "Раз в 3 хода король может наделить соседнюю фигуру выбранной способностью.",
+                "Способности короля появятся на этапе 5. На этапе 2 они отключены.",
+                mouse,
+            )
+        elif self.hints_toggle.rect.collidepoint(mouse):
+            self.tooltip.set(
+                "Показывать точки и кольца на клетках, куда может пойти выбранная фигура.",
+                mouse,
+            )
+        elif self.board_radio.rect.collidepoint(mouse):
+            self.tooltip.set(
+                "На этапе 2 доступна только стандартная доска 8×8.",
                 mouse,
             )
 
@@ -299,7 +327,7 @@ class SetupScene(Scene):
         )
         theme.draw_text(
             surface,
-            "Доска, порталы и способности короля",
+            "Стандартные шахматы 8×8 · порталы и способности — на следующих этапах",
             16,
             theme.TEXT_MUTED,
             (self.margin, 58),
@@ -335,9 +363,11 @@ class SetupScene(Scene):
         self.portal_radio.draw(surface)
 
         self.abilities_toggle.draw(surface)
+        self.hints_toggle.draw(surface)
         theme.draw_text(
             surface,
-            "Порталы размещаются случайно на свободных клетках.",
+            "Этап 2: доска 8×8, без порталов и способностей. "
+            "Другие размеры и порталы появятся на этапах 3–4.",
             14,
             theme.TEXT_DIM,
             self.info_pos,
@@ -375,7 +405,8 @@ class SetupScene(Scene):
         if not self.config.abilities_enabled:
             theme.draw_text(
                 surface,
-                "Выключены. Включите переключатель, чтобы выбрать способность для каждой стороны.",
+                "Выключены. Способности короля появятся на этапе 5. "
+                "Сейчас доступны только стандартные правила.",
                 14,
                 theme.TEXT_DIM,
                 (self.margin, self.abilities_top + 26),
@@ -424,6 +455,15 @@ class SetupScene(Scene):
                 "Выберите способность для обеих сторон",
                 13,
                 theme.DANGER,
+                self.footer_message_pos,
+                valign="middle",
+            )
+        else:
+            theme.draw_text(
+                surface,
+                "Готово: стандартная партия 8×8",
+                13,
+                theme.TEXT_DIM,
                 self.footer_message_pos,
                 valign="middle",
             )

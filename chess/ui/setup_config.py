@@ -8,6 +8,7 @@ from chess.core.pieces import BlessingType
 
 BOARD_SIZES = (6, 8, 10)
 PORTAL_COUNTS = (0, 1, 2, 3)
+STAGE2_BOARD_SIZE = 8
 
 
 @dataclass
@@ -17,6 +18,18 @@ class SetupConfig:
     abilities_enabled: bool = False
     white_ability: BlessingType | None = None
     black_ability: BlessingType | None = None
+    show_legal_hints: bool = True
+
+    def stage2_normalized(self) -> "SetupConfig":
+        """Приводит настройки к рамкам второго этапа."""
+
+        config = self.copy()
+        config.board_size = STAGE2_BOARD_SIZE
+        config.portal_count = 0
+        config.abilities_enabled = False
+        config.white_ability = None
+        config.black_ability = None
+        return config
 
     def abilities_ready(self) -> bool:
         if not self.abilities_enabled:
@@ -41,4 +54,5 @@ class SetupConfig:
             abilities_enabled=self.abilities_enabled,
             white_ability=self.white_ability,
             black_ability=self.black_ability,
+            show_legal_hints=self.show_legal_hints,
         )
