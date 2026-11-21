@@ -14,7 +14,8 @@ from chess.core.board_config import BoardConfig, GameConfig
 from chess.core.coords import Square
 from chess.core.moves import Move, Turn
 from chess.core.notation import format_turn
-from chess.core.pieces import Color, PieceType
+from chess.core.pieces import Color, Piece, PieceType
+from chess.core.portals import PortalActivation, PortalPair, generate_portals
 
 
 class GameStatus(Enum):
@@ -133,9 +134,9 @@ class GameResult:
 class GameState:
     """Полное состояние партии.
 
-    ``config`` описывает размер доски и параметры будущих механик. Поля
-    ``pending_resurrections``, ``frozen`` и ``portals`` пока пусты, но уже
-    входят в хеш позиции, чтобы повторения учитывали задел следующих этапов.
+    ``config`` описывает размер доски и параметры партии. Раскладка порталов
+    ``portals`` создаётся после начальной расстановки и входит в хеш позиции,
+    чтобы троекратное повторение учитывало пары клеток.
     """
 
     board: Board
@@ -150,7 +151,7 @@ class GameState:
     history_hashes: list[tuple] = field(default_factory=list)
     pending_resurrections: tuple = ()
     frozen: frozenset[str] = frozenset()
-    portals: tuple = ()
+    portals: list[PortalPair] = field(default_factory=list)
     _result: GameResult | None = field(default=None, init=False, repr=False)
     _result_known: bool = field(default=False, init=False, repr=False)
 
@@ -160,6 +161,8 @@ class GameState:
         elif self.board.config is not self.config.board:
             # Состояние и доска должны описывать одну и ту же доску.
             self.board.config = self.config.board
+        if not isinstance(self.portals, list):
+            self.portals = list(self.portals)
         if self.castling_rights is None:
             self.castling_rights = self.config.board.initial_castling_rights
         if not self.history_hashes:
@@ -170,15 +173,26 @@ class GameState:
     # ------------------------------------------------------------------
 
     @classmethod
-    def initial(cls, config: GameConfig | BoardConfig | int | None = None) -> "GameState":
-        """Начальная позиция выбранного размера (по умолчанию 8×8)."""
+    def initial(
+        cls,
+        config: GameConfig | BoardConfig | int | None = None,
+        rng=None,
+    ) -> "GameState":
+        """Начальная позиция выбранного размера (по умолчанию 8×8).
+
+        Порталы генерируются после расстановки фигур. ``rng`` принимает
+        ``random.Random``, целочисленный seed или ``None``; количество пар
+        берётся из :class:`GameConfig`.
+        """
 
         game_config = _resolve_game_config(config)
         board = Board.initial(game_config.board)
+        portals = generate_portals(board, game_config.portal_count, rng)
         return cls(
             board=board,
             config=game_config,
             castling_rights=game_config.board.initial_castling_rights,
+            portals=portals,
         )
 
     def copy(self) -> "GameState":
@@ -195,11 +209,74 @@ class GameState:
             history_hashes=list(self.history_hashes),
             pending_resurrections=self.pending_resurrections,
             frozen=self.frozen,
-            portals=self.portals,
+            portals=list(self.portals),
         )
         copy._result = self._result
         copy._result_known = self._result_known
         return copy
+
+    # ------------------------------------------------------------------
+    # Порталы
+    # ------------------------------------------------------------------
+
+    def _validate_activation(self, activation: PortalActivation) -> PortalPair:
+        """Проверяет, что активация ссылается на существующую пару."""
+
+        pair = next(
+            (item for item in self.portals if item.id == activation.pair_id),
+            None,
+        )
+        if pair is None:
+            raise ValueError(f"Портал с id={activation.pair_id} отсутствует")
+        if pair.other(activation.entry) != activation.exit:
+            raise ValueError(
+                "Вход и выход активации не соответствуют выбранной паре"
+            )
+        return pair
+
+    def _apply_free_teleport(self, state: "GameState", activation: PortalActivation) -> None:
+        """Переносит фигуру на выход портала в начале хода."""
+
+        self._validate_activation(activation)
+        piece = state.board.piece_at(activation.entry)
+        if piece is None:
+            raise ValueError(f"На клетке {activation.entry.name} нет фигуры")
+        if piece.color is not state.side_to_move:
+            raise ValueError("Свободный выход доступен только фигуре стороны хода")
+        if not state.board.is_empty(activation.exit):
+            raise ValueError("Выход портала занят")
+        state.board.move_piece(activation.entry, activation.exit)
+
+    def preview_free_exit(self, activation: PortalActivation) -> "GameState":
+        """Копия состояния после свободного выхода без смены стороны.
+
+        Используется генерацией ходов и интерфейсом для предпросмотра. Права
+        на рокировку снимаются так же, как при применении хода: фигура считается
+        двигавшейся, поэтому рокировка после выхода невозможна.
+        """
+
+        piece = self.board.piece_at(activation.entry)
+        state = self.copy()
+        self._apply_free_teleport(state, activation)
+        if piece is not None:
+            rights = set(state.castling_rights or ())
+            _drop_piece_rights(rights, state.config.board, piece, activation.entry)
+            state.castling_rights = frozenset(rights)
+        return state
+
+    def free_exit_activation(self, square: Square) -> PortalActivation | None:
+        """Активация свободного выхода с клетки ``square``, если она возможна."""
+
+        piece = self.board.piece_at(square)
+        if piece is None or piece.color is not self.side_to_move:
+            return None
+        pair = next((item for item in self.portals if item.contains(square)), None)
+        if pair is None:
+            return None
+        exit_square = pair.other(square)
+        if exit_square is None or not self.board.is_empty(exit_square):
+            return None
+        return PortalActivation(pair.id, square, exit_square)
 
     # ------------------------------------------------------------------
     # Повторения и хеш позиции
@@ -211,8 +288,7 @@ class GameState:
 
         Включает расстановку с id фигур, сторону хода, права рокировки, поле
         взятия на проходе, отложенные возрождения, замороженные фигуры и
-        раскладку порталов. Специальные механики пока не реализованы, но их
-        поля уже участвуют в хеше.
+        раскладку порталов. Поля будущих благословений уже участвуют в хеше.
         """
 
         pieces = tuple(
@@ -277,15 +353,58 @@ class GameState:
             raise ValueError("Партия уже завершена")
         if not turn.moves:
             raise ValueError("Пустой Turn")
+        if turn.portal_activation_count > 1:
+            raise ValueError("За ход разрешена не более одной активации портала")
+        if turn.free_teleport is not None and any(
+            move.teleport is not None for move in turn.moves
+        ):
+            raise ValueError(
+                "Свободный выход и телепортация в ходе взаимоисключающи"
+            )
 
         state = self.copy()
         rights = set(state.castling_rights or ())
         board_config = state.config.board
 
+        if turn.free_teleport is not None:
+            activation = turn.free_teleport
+            piece = state.board.piece_at(activation.entry)
+            if piece is not None:
+                _drop_piece_rights(rights, board_config, piece, activation.entry)
+            self._apply_free_teleport(state, activation)
+            state.en_passant_target = None
+
         for move in turn.moves:
             piece = state.board.piece_at(move.from_square)
             if piece is None:
                 raise ValueError(f"На клетке {move.from_square.name} нет фигуры")
+
+            if move.teleport is not None:
+                self._validate_activation(move.teleport)
+                _drop_piece_rights(rights, board_config, piece, move.from_square)
+                if move.capture is not None:
+                    captured = state.board.piece_at(move.to_square)
+                    if captured is None:
+                        raise ValueError("На конечной клетке нет фигуры для взятия")
+                    _drop_piece_rights(
+                        rights,
+                        board_config,
+                        captured,
+                        move.to_square,
+                    )
+
+                from chess.core.rules import _apply_teleport_to_board
+
+                moved = _apply_teleport_to_board(state.board, piece, move)
+                state.en_passant_target = None
+                is_capture = move.capture is not None
+                state.halfmove_clock = (
+                    0
+                    if (piece.type is PieceType.PAWN or is_capture)
+                    else state.halfmove_clock + 1
+                )
+                state.last_move = move
+                continue
 
             captured_square: Square | None = None
             if move.en_passant:
@@ -299,10 +418,7 @@ class GameState:
                     _drop_rook_right(rights, board_config, captured.color, captured.square)
                 state.board.remove_piece(captured_square)
 
-            if piece.type is PieceType.KING:
-                _drop_king_rights(rights, piece.color)
-            elif piece.type is PieceType.ROOK:
-                _drop_rook_right(rights, board_config, piece.color, piece.square)
+            _drop_piece_rights(rights, board_config, piece, move.from_square)
 
             moved = state.board.move_piece(move.from_square, move.to_square)
 
@@ -393,9 +509,9 @@ class GameState:
     def evaluate_result(self) -> GameResult | None:
         """Определяет мат, пат и все автоматические ничьи."""
 
-        from chess.core.rules import generate_legal_moves, is_in_check
+        from chess.core.rules import generate_legal_turns, is_in_check
 
-        if not generate_legal_moves(self):
+        if not generate_legal_turns(self):
             if is_in_check(self, self.side_to_move):
                 status = (
                     GameStatus.WHITE_WIN
@@ -487,6 +603,20 @@ def _stable_tuple(value: tuple) -> tuple:
     """Приводит задел будущих механик к стабильному хешируемому виду."""
 
     return tuple(sorted(repr(item) for item in value))
+
+
+def _drop_piece_rights(
+    rights: set[str],
+    board_config: BoardConfig,
+    piece: Piece,
+    square: Square,
+) -> None:
+    """Снимает права на рокировку после ухода фигуры с клетки."""
+
+    if piece.type is PieceType.KING:
+        _drop_king_rights(rights, piece.color)
+    elif piece.type is PieceType.ROOK:
+        _drop_rook_right(rights, board_config, piece.color, square)
 
 
 def _drop_king_rights(rights: set[str], color: Color) -> None:

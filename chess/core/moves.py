@@ -1,7 +1,8 @@
 """Объекты ходов и составного действия (Turn).
 
-На этапе 2 Turn содержит ровно один ход. Поля ``bless`` и ``freeze`` оставлены
-для будущих этапов, чтобы не менять структуру данных.
+На этапе 4 Turn содержит ровно один ход, но уже поддерживает свободный выход
+из портала в начале хода. Поля ``bless`` и ``freeze`` оставлены для будущих
+этапов, чтобы не менять структуру данных.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from dataclasses import dataclass, field
 
 from chess.core.coords import Square
 from chess.core.pieces import Piece, PieceType
+from chess.core.portals import PortalActivation
 
 
 @dataclass(frozen=True)
@@ -24,7 +26,7 @@ class Move:
     castle: str | None = None  # "K" — короткая, "Q" — длинная
     en_passant: bool = False
     is_double: bool = False
-    teleport: object | None = None
+    teleport: PortalActivation | None = None
     pass_through: bool = False
 
     @property
@@ -39,12 +41,22 @@ class Move:
     def is_castle(self) -> bool:
         return self.castle is not None
 
+    @property
+    def is_teleport(self) -> bool:
+        return self.teleport is not None
+
 
 @dataclass
 class Turn:
-    """Действие стороны. На этапе 2 — ровно один :class:`Move`."""
+    """Действие стороны.
+
+    ``free_teleport`` — необязательный свободный выход в начале хода. Он
+    выполняется до основного действия и расходует единственную активацию
+    портала за ход, поэтому не может сочетаться с ``Move.teleport``.
+    """
 
     moves: list[Move] = field(default_factory=list)
+    free_teleport: PortalActivation | None = None
     bless: object | None = None
     freeze: object | None = None
 
@@ -55,8 +67,14 @@ class Turn:
     @property
     def move(self) -> Move:
         if len(self.moves) != 1:
-            raise ValueError("На этапе 2 Turn должен содержать ровно один ход")
+            raise ValueError("Turn должен содержать ровно один основной ход")
         return self.moves[0]
+
+    @property
+    def portal_activation_count(self) -> int:
+        return int(self.free_teleport is not None) + sum(
+            1 for move in self.moves if move.teleport is not None
+        )
 
 
 def make_move(
@@ -68,6 +86,7 @@ def make_move(
     castle: str | None = None,
     en_passant: bool = False,
     is_double: bool = False,
+    teleport: PortalActivation | None = None,
 ) -> Move:
     """Удобная фабрика ходов для правил и тестов."""
 
@@ -80,6 +99,7 @@ def make_move(
         castle=castle,
         en_passant=en_passant,
         is_double=is_double,
+        teleport=teleport,
     )
 
 

@@ -20,6 +20,7 @@ from chess.core.board_config import BoardConfig, GameConfig
 from chess.core.coords import Square
 from chess.core.game_state import GameState
 from chess.core.pieces import BlessingType, Color, Piece, PieceType
+from chess.core.portals import PortalPair
 from chess.core.rules import generate_legal_moves
 from chess.ui import piece_art, theme
 from chess.ui.app import App
@@ -571,6 +572,155 @@ def test_game_layout_survives_minimum_window(app: App) -> None:
         scene.draw(surface)
     finally:
         app._resize(*theme.WINDOW_DEFAULT_SIZE)
+
+
+# ---------------------------------------------------------------------------
+# Порталы
+# ---------------------------------------------------------------------------
+
+
+def _portal_state(rook_square: str) -> GameState:
+    board = Board.empty(BoardConfig.for_size(8))
+    for piece in (
+        Piece(
+            "wK-e1",
+            PieceType.KING,
+            Color.WHITE,
+            Square.from_name("e1"),
+            Square.from_name("e1"),
+        ),
+        Piece(
+            "bK-e8",
+            PieceType.KING,
+            Color.BLACK,
+            Square.from_name("e8"),
+            Square.from_name("e8"),
+        ),
+        Piece(
+            f"wR-{rook_square}",
+            PieceType.ROOK,
+            Color.WHITE,
+            Square.from_name(rook_square),
+            Square.from_name(rook_square),
+        ),
+    ):
+        board.add_piece(piece)
+    return GameState(
+        board=board,
+        config=GameConfig.for_size(8),
+        side_to_move=Color.WHITE,
+        castling_rights=frozenset(),
+        portals=(PortalPair(0, 0, 0, Square.from_name("a4"), Square.from_name("h4")),),
+    )
+
+
+def _count_color(surface: pygame.Surface, rect: pygame.Rect, color) -> int:
+    found = 0
+    for x in range(rect.left, rect.right):
+        for y in range(rect.top, rect.bottom):
+            if surface.get_at((x, y))[:3] == color:
+                found += 1
+    return found
+
+
+@pytest.mark.parametrize("size", [6, 8, 10])
+def test_portals_are_drawn_on_every_board(app: App, size: int) -> None:
+    scene = GameScene(app, SetupConfig(board_size=size, portal_count=3))
+    scene._layout()
+    assert len(scene.state.portals) == 3
+    surface = pygame.Surface(app.screen.get_size())
+    scene.draw(surface)
+
+    for portal in scene.state.portals:
+        color = theme.portal_color(portal.color_index)
+        for square in portal.squares:
+            rect = scene.board_view.square_rect(square.file, square.rank)
+            assert _count_color(surface, rect, color) > 0
+
+
+def test_portal_tooltip_and_free_exit_highlight_draw(app: App) -> None:
+    scene = GameScene(app, SetupConfig())
+    scene.state = _portal_state("a4")
+    scene._layout()
+    pair = scene.state.portals[0]
+    scene.hover_portal = (pair, Square.from_name("a4"))
+    _click(scene, scene.board_view.square_center(0, 3))  # a4
+    assert scene.free_exit_target is not None
+
+    surface = pygame.Surface(app.screen.get_size())
+    scene.draw(surface)
+    assert _count_color(
+        surface,
+        scene.board_view.square_rect(0, 3),
+        theme.portal_color(pair.color_index),
+    ) > 0
+
+
+def test_free_exit_through_click_handler(app: App) -> None:
+    scene = GameScene(app, SetupConfig())
+    scene.state = _portal_state("a4")
+    scene._layout()
+    surface = pygame.Surface(app.screen.get_size())
+    scene.draw(surface)
+
+    _click(scene, scene.board_view.square_center(0, 3))  # a4
+    assert scene.selected == Square.from_name("a4")
+    assert scene.free_exit_target is not None
+    assert scene.free_exit_target.exit == Square.from_name("h4")
+
+    _click(scene, scene.board_view.square_center(7, 3))  # h4
+    assert scene.free_exit is not None
+    assert scene.selected == Square.from_name("h4")
+    # Исходное состояние не изменилось, но предпросмотр рисует фигуру на выходе.
+    assert scene.state.board.piece_at(Square.from_name("a4")) is not None
+    preview = scene._active_state()
+    assert preview.board.is_empty(Square.from_name("a4"))
+    assert preview.board.piece_at(Square.from_name("h4")).id == "wR-a4"
+    assert Square.from_name("h8") in scene.legal_by_target
+    scene.draw(surface)
+
+    _click(scene, scene.board_view.square_center(7, 7))  # h8
+    assert scene.free_exit is None
+    assert scene.state.board.piece_at(Square.from_name("h8")).id == "wR-a4"
+    assert scene.state.history[-1] == "a4~h4-h8"
+    assert scene.teleport_flash is not None
+
+
+def test_free_exit_can_be_cancelled_by_right_click(app: App) -> None:
+    scene = GameScene(app, SetupConfig())
+    scene.state = _portal_state("a4")
+    scene._layout()
+    _click(scene, scene.board_view.square_center(0, 3))
+    _click(scene, scene.board_view.square_center(7, 3))
+    assert scene.free_exit is not None
+
+    scene.handle_event(
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=3, pos=(0, 0))
+    )
+    assert scene.free_exit is None
+    assert scene.selected is None
+    assert scene.state.board.piece_at(Square.from_name("a4")) is not None
+    assert scene.state.board.is_empty(Square.from_name("h4"))
+
+
+def test_teleport_move_through_click_handler(app: App) -> None:
+    scene = GameScene(app, SetupConfig())
+    scene.state = _portal_state("a1")
+    scene._layout()
+    surface = pygame.Surface(app.screen.get_size())
+    scene.draw(surface)
+
+    _click(scene, scene.board_view.square_center(0, 0))  # a1
+    assert scene.selected == Square.from_name("a1")
+    assert scene.free_exit_target is None
+    assert Square.from_name("h5") in scene.legal_by_target
+    scene.draw(surface)
+
+    _click(scene, scene.board_view.square_center(7, 4))  # h5
+    assert scene.state.board.piece_at(Square.from_name("h5")).id == "wR-a1"
+    assert scene.state.history[-1] == "a1-a4~h4-h5"
+    assert scene.teleport_flash is not None
+    assert scene.state.side_to_move is Color.BLACK
 
 
 def test_core_has_no_pygame_imports() -> None:

@@ -24,6 +24,7 @@ class DisplayPiece:
 class PortalMarker:
     square: Square
     color_index: int
+    symbol_index: int = 0
     label: str = ""
 
 
@@ -96,6 +97,9 @@ class BoardView:
         last_move: tuple[Square, Square] | None = None,
         check_square: Square | None = None,
         legal_targets: dict[Square, str] | None = None,
+        portal_targets: dict[Square, int] | None = None,
+        free_exit_target: Square | None = None,
+        free_exit_color_index: int = 0,
         hover_capture: Square | None = None,
         portals: list[PortalMarker] | None = None,
         show_coordinates: bool = True,
@@ -115,8 +119,14 @@ class BoardView:
             self._fill_square(surface, selected, theme.ACCENT, 40)
             self._stroke_square(surface, selected, theme.ACCENT, 3)
 
+        if free_exit_target is not None:
+            self._draw_free_exit(surface, free_exit_target, free_exit_color_index)
+
         if legal_targets:
             self._draw_legal_targets(surface, legal_targets)
+
+        if portal_targets:
+            self._draw_portal_targets(surface, portal_targets)
 
         if hover_capture is not None:
             pulse = 0.5 + 0.5 * math.sin(self.pulse_phase)
@@ -140,15 +150,58 @@ class BoardView:
 
         if portals:
             for marker in portals:
-                self._draw_portal(surface, marker)
+                self._draw_portal_ring(surface, marker)
 
         if pieces:
             for piece in pieces:
                 rect = self.square_rect(*piece.square).inflate(-6, -6)
                 piece_art.draw_piece(surface, piece.piece_type, piece.color, rect)
 
+        if portals:
+            for marker in portals:
+                self._draw_portal_symbol(surface, marker)
+
         if show_coordinates:
             self._draw_coordinates(surface)
+
+    def draw_portal_flash(
+        self,
+        surface: pygame.Surface,
+        entry: Square,
+        exit_square: Square,
+        color_index: int,
+        progress: float,
+    ) -> None:
+        """Короткая вспышка на входе и выходе телепорта.
+
+        ``progress`` изменяется от 0 к 1; анимация не блокирует ввод.
+        """
+
+        progress = max(0.0, min(1.0, progress))
+        color = theme.portal_color(color_index)
+        alpha = int(190 * (1.0 - progress))
+        if alpha <= 0:
+            return
+        for square in (entry, exit_square):
+            rect = self.square_rect(*square)
+            overlay = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+            center = (rect.w // 2, rect.h // 2)
+            radius = int(self.square_size * (0.18 + 0.30 * progress))
+            pygame.draw.circle(
+                overlay,
+                theme.with_alpha(color, alpha),
+                center,
+                max(4, radius),
+                width=max(2, self.square_size // 22),
+            )
+            pygame.draw.circle(
+                overlay,
+                theme.with_alpha(color, alpha // 2),
+                center,
+                max(2, radius // 2),
+                width=1,
+            )
+            surface.blit(overlay, rect.topleft)
 
     def _draw_board_base(self, surface: pygame.Surface) -> None:
         shadow = self.board_rect.move(5, 6)
@@ -201,41 +254,128 @@ class BoardView:
                     max(radius + 4, int(self.square_size * 0.36)),
                     width=max(2, self.square_size // 24),
                 )
-            elif kind == "portal":
-                pygame.draw.circle(
-                    surface,
-                    theme.PORTAL_COLORS[0],
-                    center,
-                    max(radius + 4, int(self.square_size * 0.36)),
-                    width=max(2, self.square_size // 24),
-                )
             else:
                 pygame.draw.circle(surface, theme.ACCENT, center, radius)
 
-    def _draw_portal(self, surface: pygame.Surface, marker: PortalMarker) -> None:
-        rect = self.square_rect(*marker.square)
-        color = theme.portal_color(marker.color_index)
+    def _draw_portal_targets(
+        self,
+        surface: pygame.Surface,
+        targets: dict[Square, int],
+    ) -> None:
+        """Кольца цвета портала на конечных клетках телепортации."""
+
+        for square, color_index in targets.items():
+            color = theme.portal_color(color_index)
+            center = self.square_rect(*square).center
+            radius = max(5, int(self.square_size * 0.34))
+            pygame.draw.circle(
+                surface,
+                color,
+                center,
+                radius,
+                width=max(2, self.square_size // 22),
+            )
+            pygame.draw.circle(
+                surface,
+                color,
+                center,
+                max(2, radius // 2),
+                width=max(1, self.square_size // 34),
+            )
+
+    def _draw_free_exit(
+        self,
+        surface: pygame.Surface,
+        square: Square,
+        color_index: int,
+    ) -> None:
+        """Подсветка свободного выхода выбранной фигуры."""
+
+        color = theme.portal_color(color_index)
+        pulse = 0.5 + 0.5 * math.sin(self.pulse_phase * 1.4)
+        rect = self.square_rect(*square)
+        self._fill_square(surface, square, color, int(42 + 22 * pulse))
+        self._stroke_square(surface, square, color, 3)
         center = rect.center
-        radius = max(8, int(self.square_size * 0.36))
-
-        overlay = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
-        pygame.draw.circle(overlay, (0, 0, 0, 70), (rect.w // 2, rect.h // 2), radius)
-        surface.blit(overlay, rect.topleft)
-
-        pygame.draw.circle(surface, color, center, radius, width=max(2, self.square_size // 20))
+        radius = max(6, int(self.square_size * (0.24 + 0.05 * pulse)))
         pygame.draw.circle(
             surface,
             color,
             center,
-            max(3, radius // 2),
-            width=max(1, self.square_size // 30),
+            radius,
+            width=max(2, self.square_size // 22),
         )
-        label = marker.label or str(marker.color_index + 1)
-        font_size = max(12, int(self.square_size * 0.30))
+        theme.draw_text(
+            surface,
+            "выход",
+            max(9, int(self.square_size * 0.14)),
+            color,
+            (center[0], rect.bottom - max(7, self.square_size // 12)),
+            align="center",
+            valign="bottom",
+            bold=True,
+        )
+
+    def _draw_portal_ring(
+        self,
+        surface: pygame.Surface,
+        marker: PortalMarker,
+    ) -> None:
+        rect = self.square_rect(*marker.square)
+        color = theme.portal_color(marker.color_index)
+        overlay = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+        pygame.draw.circle(
+            overlay,
+            theme.with_alpha(color, 34),
+            (rect.w // 2, rect.h // 2),
+            max(4, int(self.square_size * 0.45)),
+        )
+        surface.blit(overlay, rect.topleft)
+        pygame.draw.rect(
+            surface,
+            color,
+            rect.inflate(-5, -5),
+            width=max(2, self.square_size // 26),
+            border_radius=max(4, self.square_size // 9),
+        )
+
+    def _draw_portal_symbol(
+        self,
+        surface: pygame.Surface,
+        marker: PortalMarker,
+    ) -> None:
+        rect = self.square_rect(*marker.square)
+        color = theme.portal_color(marker.color_index)
+        label = marker.label or theme.portal_symbol(marker.symbol_index)
+
+        badge_radius = max(8, int(self.square_size * 0.15))
+        center = (
+            rect.right - badge_radius - max(3, self.square_size // 22),
+            rect.top + badge_radius + max(3, self.square_size // 22),
+        )
+        badge = pygame.Surface(
+            (badge_radius * 2 + 4, badge_radius * 2 + 4),
+            pygame.SRCALPHA,
+        )
+        pygame.draw.circle(
+            badge,
+            (20, 20, 26, 185),
+            (badge.get_width() // 2, badge.get_height() // 2),
+            badge_radius + 2,
+        )
+        pygame.draw.circle(
+            badge,
+            theme.with_alpha(color, 235),
+            (badge.get_width() // 2, badge.get_height() // 2),
+            badge_radius + 2,
+            width=max(1, self.square_size // 40),
+        )
+        surface.blit(badge, (center[0] - badge.get_width() // 2, center[1] - badge.get_height() // 2))
+
         theme.draw_text(
             surface,
             label,
-            font_size,
+            max(10, int(self.square_size * 0.21)),
             color,
             center,
             align="center",

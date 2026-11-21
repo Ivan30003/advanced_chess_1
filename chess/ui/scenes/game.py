@@ -13,10 +13,11 @@ from chess.core.pieces import (
     Color,
     PieceType,
 )
+from chess.core.portals import PortalActivation, PortalPair, portal_at
 from chess.core.rules import generate_legal_moves, is_in_check
 from chess.ui import piece_art, theme
 from chess.ui.app import Scene
-from chess.ui.board_view import BoardView, DisplayPiece
+from chess.ui.board_view import BoardView, DisplayPiece, PortalMarker
 from chess.ui.setup_config import SetupConfig
 from chess.ui.widgets import Button
 
@@ -40,10 +41,14 @@ class GameScene(Scene):
         self.state = GameState.initial(self.game_config)
         self.selected: Square | None = None
         self.legal_by_target: dict[Square, list[Move]] = {}
+        self.free_exit: PortalActivation | None = None
+        self.free_exit_target: PortalActivation | None = None
+        self.hover_portal: tuple[PortalPair, Square] | None = None
         self.hover_capture: tuple[int, int] | None = None
         self.pending_promotion: list[Move] | None = None
         self.promotion_hover: PieceType | None = None
         self.promotion_rects: dict[PieceType, pygame.Rect] = {}
+        self.teleport_flash: tuple[Square, Square, int, float] | None = None
         self.log_scroll = 0.0
         self.log_follow = True
 
@@ -69,6 +74,8 @@ class GameScene(Scene):
         self.state = GameState.initial(self.game_config)
         self._clear_selection()
         self.pending_promotion = None
+        self.hover_portal = None
+        self.teleport_flash = None
         self.log_scroll = 0.0
         self.log_follow = True
 
@@ -76,20 +83,60 @@ class GameScene(Scene):
         self.selected = None
         self.legal_by_target = {}
         self.hover_capture = None
+        self.free_exit = None
+        self.free_exit_target = None
 
-    def _select(self, square: Square) -> None:
+    def _active_state(self) -> GameState:
+        """Состояние для показа ходов: с учётом ещё не применённого выхода."""
+
+        if self.free_exit is None:
+            return self.state
+        return self.state.preview_free_exit(self.free_exit)
+
+    def _fill_targets(self, state: GameState, square: Square) -> None:
         moves = [
             move
-            for move in generate_legal_moves(self.state)
+            for move in generate_legal_moves(state)
             if move.from_square == square
         ]
-        self.selected = square
         self.legal_by_target = {}
         for move in moves:
             self.legal_by_target.setdefault(move.to_square, []).append(move)
 
+    def _select(self, square: Square) -> None:
+        state = self._active_state()
+        self.selected = square
+        self._fill_targets(state, square)
+        self.free_exit_target = (
+            None if self.free_exit is not None else self.state.free_exit_activation(square)
+        )
+
+    def _activate_free_exit(self) -> None:
+        if self.free_exit_target is None:
+            return
+        self.free_exit = self.free_exit_target
+        # Выход временно становится позицией фигуры; сам ход ещё не применён.
+        self._select(self.free_exit.exit)
+
+    def _portal_pair_by_id(self, pair_id: int) -> PortalPair | None:
+        return next((pair for pair in self.state.portals if pair.id == pair_id), None)
+
     def _execute(self, move: Move) -> None:
-        self.state = self.state.apply_turn(Turn.single(move))
+        activation = move.teleport
+        if activation is None:
+            activation = self.free_exit
+        if activation is not None:
+            pair = self._portal_pair_by_id(activation.pair_id)
+            if pair is not None:
+                self.teleport_flash = (
+                    activation.entry,
+                    activation.exit,
+                    pair.color_index,
+                    0.0,
+                )
+        self.state = self.state.apply_turn(
+            Turn(moves=[move], free_teleport=self.free_exit)
+        )
         self.pending_promotion = None
         self._clear_selection()
         self.log_follow = True
@@ -97,7 +144,7 @@ class GameScene(Scene):
     def _handle_board_click(self, square: Square) -> None:
         if self.state.result is not None:
             return
-        piece = self.state.board.piece_at(square)
+        piece = self._active_state().board.piece_at(square)
 
         if self.selected is None:
             if piece is not None and piece.color is self.state.side_to_move:
@@ -106,6 +153,15 @@ class GameScene(Scene):
 
         if square == self.selected:
             self._clear_selection()
+            return
+
+        # Клик по свободному выходу — это не обычный ход, а начало действия.
+        if (
+            self.free_exit is None
+            and self.free_exit_target is not None
+            and square == self.free_exit_target.exit
+        ):
+            self._activate_free_exit()
             return
 
         candidates = self.legal_by_target.get(square)
@@ -120,9 +176,14 @@ class GameScene(Scene):
             return
 
         # Клик по своей фигуре переключает выбор, по нелегальной клетке —
-        # снимает его. Такое поведение описано в README.
+        # снимает его. После свободного выхода выбор начинается заново.
         if piece is not None and piece.color is self.state.side_to_move:
-            self._select(square)
+            if self.free_exit is not None:
+                self.free_exit = None
+                self.free_exit_target = None
+                self._select(square)
+            else:
+                self._select(square)
         else:
             self._clear_selection()
 
@@ -300,20 +361,32 @@ class GameScene(Scene):
             self._layout()
         self.board_view.update(dt)
 
+        if self.teleport_flash is not None:
+            entry, exit_square, color_index, progress = self.teleport_flash
+            progress += dt * 2.4
+            if progress >= 1.0:
+                self.teleport_flash = None
+            else:
+                self.teleport_flash = (entry, exit_square, color_index, progress)
+
         self.hover_capture = None
-        if (
-            self.selected is not None
-            and self.pending_promotion is None
-            and self.state.result is None
-        ):
-            square = self.board_view.square_at(pygame.mouse.get_pos())
-            if square is not None:
-                core_square = Square(*square)
+        self.hover_portal = None
+        mouse = pygame.mouse.get_pos()
+        square = self.board_view.square_at(mouse)
+        if square is not None:
+            core_square = Square(*square)
+            pair = portal_at(self.state.portals, core_square)
+            if pair is not None and self.pending_promotion is None:
+                self.hover_portal = (pair, core_square)
+            if (
+                self.selected is not None
+                and self.pending_promotion is None
+                and self.state.result is None
+            ):
                 candidates = self.legal_by_target.get(core_square, [])
                 if any(move.is_capture for move in candidates):
                     self.hover_capture = square
 
-        mouse = pygame.mouse.get_pos()
         if self.state.result is not None:
             for button in self.result_buttons.values():
                 button.hovered = button.contains(mouse)
@@ -341,7 +414,8 @@ class GameScene(Scene):
         )
         theme.draw_text(
             surface,
-            f"Доска {self.game_config.size}×{self.game_config.size} · hot-seat · клик-клик",
+            f"Доска {self.game_config.size}×{self.game_config.size} · "
+            f"порталов: {len(self.state.portals)} · hot-seat · клик-клик",
             16,
             theme.TEXT_MUTED,
             (self.margin, 58),
@@ -349,6 +423,7 @@ class GameScene(Scene):
 
         self._draw_board(surface)
         self._draw_panel(surface)
+        self._draw_portal_tooltip(surface)
 
         if self.pending_promotion:
             self._draw_promotion(surface)
@@ -357,13 +432,16 @@ class GameScene(Scene):
 
     def _draw_board(self, surface: pygame.Surface) -> None:
         state = self.state
+        # В режиме предпросмотра свободного выхода фигура уже показывается
+        # на выходе, хотя сам ход ещё не применён.
+        display_board = self._active_state().board
         pieces = [
             DisplayPiece(
                 piece_type=piece.type,
                 color=piece.color,
                 square=_ui_square(piece.square),
             )
-            for piece in state.board.pieces.values()
+            for piece in display_board.pieces.values()
         ]
 
         selected = _ui_square(self.selected) if self.selected is not None else None
@@ -381,10 +459,43 @@ class GameScene(Scene):
                 check_square = _ui_square(king_square)
 
         legal_targets: dict[tuple[int, int], str] = {}
+        portal_targets: dict[tuple[int, int], int] = {}
         if self.config.show_legal_hints and self.selected is not None:
             for target, moves in self.legal_by_target.items():
                 kind = "capture" if any(move.is_capture for move in moves) else "move"
                 legal_targets[_ui_square(target)] = kind
+                activation = next(
+                    (move.teleport for move in moves if move.teleport is not None),
+                    None,
+                )
+                if activation is not None:
+                    pair = self._portal_pair_by_id(activation.pair_id)
+                    if pair is not None:
+                        portal_targets[_ui_square(target)] = pair.color_index
+
+        free_exit_target = None
+        free_exit_color = 0
+        if self.free_exit_target is not None:
+            pair = self._portal_pair_by_id(self.free_exit_target.pair_id)
+            if pair is not None:
+                free_exit_target = _ui_square(self.free_exit_target.exit)
+                free_exit_color = pair.color_index
+
+        portal_markers = [
+            PortalMarker(
+                square=_ui_square(pair.a),
+                color_index=pair.color_index,
+                symbol_index=pair.symbol_index,
+            )
+            for pair in state.portals
+        ] + [
+            PortalMarker(
+                square=_ui_square(pair.b),
+                color_index=pair.color_index,
+                symbol_index=pair.symbol_index,
+            )
+            for pair in state.portals
+        ]
 
         self.board_view.draw(
             surface,
@@ -393,9 +504,23 @@ class GameScene(Scene):
             last_move=last_move,
             check_square=check_square,
             legal_targets=legal_targets,
+            portal_targets=portal_targets,
+            free_exit_target=free_exit_target,
+            free_exit_color_index=free_exit_color,
             hover_capture=self.hover_capture,
+            portals=portal_markers,
             show_coordinates=True,
         )
+
+        if self.teleport_flash is not None:
+            entry, exit_square, color_index, progress = self.teleport_flash
+            self.board_view.draw_portal_flash(
+                surface,
+                _ui_square(entry),
+                _ui_square(exit_square),
+                color_index,
+                progress,
+            )
 
     def _draw_panel(self, surface: pygame.Surface) -> None:
         theme.draw_panel(
@@ -423,10 +548,19 @@ class GameScene(Scene):
             (x, self.panel_rect.top + 46),
             max_width=self.panel_rect.w - 36,
         )
-        if self.config.portal_count or self.config.abilities_enabled:
+        if self.state.portals:
             theme.draw_text(
                 surface,
-                "Будет добавлено на следующих этапах.",
+                f"Порталов: {len(self.state.portals)} пар · 1 активация за ход",
+                11,
+                theme.TEXT_DIM,
+                (x, self.panel_rect.top + 62),
+                max_width=self.panel_rect.w - 36,
+            )
+        elif self.config.abilities_enabled:
+            theme.draw_text(
+                surface,
+                "Способности короля появятся на этапе 5.",
                 11,
                 theme.TEXT_DIM,
                 (x, self.panel_rect.top + 62),
@@ -463,6 +597,8 @@ class GameScene(Scene):
         detail = f"Ход №{self.state.turn_number}"
         if in_check:
             detail += " · шах!"
+        elif self.free_exit is not None:
+            detail += " · свободный выход: выберите ход"
         elif not is_result:
             detail += " · выберите фигуру"
         theme.draw_text(
@@ -554,6 +690,47 @@ class GameScene(Scene):
                 pygame.Rect(track.left, thumb_y, track.w, thumb_h),
                 border_radius=2,
             )
+
+    def _draw_portal_tooltip(self, surface: pygame.Surface) -> None:
+        if self.hover_portal is None:
+            return
+        pair, square = self.hover_portal
+        partner = pair.other(square)
+        if partner is None:
+            return
+        color = theme.portal_color(pair.color_index)
+        text = (
+            f"Портал {theme.portal_name(pair.color_index)}: "
+            f"связан с {partner.name}"
+        )
+        font_size = 14
+        font = theme.get_font(font_size)
+        width = font.size(text)[0] + 22
+        height = 30
+        mouse = pygame.mouse.get_pos()
+        rect = pygame.Rect(mouse[0] + 16, mouse[1] + 16, width, height)
+        screen = surface.get_rect()
+        if rect.right > screen.right - 10:
+            rect.right = mouse[0] - 12
+        if rect.bottom > screen.bottom - 10:
+            rect.bottom = mouse[1] - 12
+        rect.clamp_ip(screen.inflate(-12, -12))
+        theme.draw_panel(
+            surface,
+            rect,
+            theme.PANEL,
+            radius=theme.RADIUS_SMALL,
+            border=color,
+            shadow=True,
+        )
+        theme.draw_text_in_rect(
+            surface,
+            text,
+            rect,
+            font_size,
+            color,
+            bold=True,
+        )
 
     def _draw_promotion(self, surface: pygame.Surface) -> None:
         overlay = pygame.Surface(surface.get_size(), pygame.SRCALPHA)

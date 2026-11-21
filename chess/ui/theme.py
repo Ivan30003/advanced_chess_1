@@ -57,6 +57,9 @@ PORTAL_COLORS = [
     (240, 178, 63),
 ]
 
+PORTAL_NAMES = ("циан", "маджента", "янтарь")
+PORTAL_SYMBOLS = ("◎", "△", "★")
+
 # ---------------------------------------------------------------------------
 # Кнопки
 # ---------------------------------------------------------------------------
@@ -307,3 +310,11 @@ def draw_checker_pattern(
 
 def portal_color(index: int) -> tuple[int, int, int]:
     return PORTAL_COLORS[index % len(PORTAL_COLORS)]
+
+
+def portal_name(index: int) -> str:
+    return PORTAL_NAMES[index % len(PORTAL_NAMES)]
+
+
+def portal_symbol(index: int) -> str:
+    return PORTAL_SYMBOLS[index % len(PORTAL_SYMBOLS)]
