@@ -36,6 +36,7 @@ def _piece(
     color: Color,
     square: str,
     *,
+    original: str | None = None,
     blessing: BlessingType | None = None,
     ever_blessed: bool = False,
     blessing_used: bool = False,
@@ -46,7 +47,7 @@ def _piece(
         type=piece_type,
         color=color,
         square=Square.from_name(square),
-        original_square=Square.from_name(square),
+        original_square=Square.from_name(original or square),
         blessing=blessing,
         ever_blessed=ever_blessed,
         blessing_used=blessing_used,
@@ -736,6 +737,41 @@ def test_resurrection_returns_unblessed_on_original_square() -> None:
     assert revived.blessing is None
     assert revived.ever_blessed is True
     assert after.pending_resurrections == []
+    assert any("возрождение" in line for line in after.history)
+
+
+def test_resurrection_returns_black_knight_to_starting_square() -> None:
+    """Пример: конь g8 погиб на f6 и возвращается на g8, а не на f6."""
+
+    state = _state(
+        [
+            _piece("wK", PieceType.KING, Color.WHITE, "e1"),
+            _piece("bK", PieceType.KING, Color.BLACK, "h8"),
+            _piece("wP-e5", PieceType.PAWN, Color.WHITE, "e5"),
+            _piece(
+                "bN-f6",
+                PieceType.KNIGHT,
+                Color.BLACK,
+                "f6",
+                original="g8",
+                blessing=BlessingType.RESURRECTION,
+                ever_blessed=True,
+            ),
+        ],
+        white_choice=BlessingType.INVULNERABILITY,
+        black_choice=BlessingType.RESURRECTION,
+    )
+    capture = _find_move(state, "e5", "f6")
+    after = state.apply_turn(Turn.single(capture))
+
+    assert after.board.piece_at(Square.from_name("f6")).id == "wP-e5"
+    assert after.pending_resurrections == []
+    revived = after.board.piece_at(Square.from_name("g8"))
+    assert revived is not None
+    assert revived.id == "bN-f6"
+    assert revived.type is PieceType.KNIGHT
+    assert revived.blessing is None
+    assert revived.ever_blessed is True
     assert any("возрождение" in line for line in after.history)
 
 

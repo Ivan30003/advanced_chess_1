@@ -1027,7 +1027,7 @@ def _note_resurrection(state: "GameState", victim: Piece) -> None:
             piece_id=victim.id,
             piece_type=victim.type,
             color=victim.color,
-            original_square=victim.square,
+            original_square=victim.original_square,
             turn_created=state.turn_number,
         )
     )
