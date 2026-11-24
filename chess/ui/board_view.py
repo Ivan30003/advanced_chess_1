@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import pygame
 
-from chess.core.pieces import Color, PieceType
+from chess.core.pieces import BlessingType, Color, PieceType
 from chess.ui import piece_art, theme
 
 Square = tuple[int, int]
@@ -18,6 +18,9 @@ class DisplayPiece:
     piece_type: PieceType
     color: Color
     square: Square
+    blessing: BlessingType | None = None
+    blessing_used: bool = False
+    frozen: bool = False
 
 
 @dataclass(frozen=True)
@@ -156,6 +159,12 @@ class BoardView:
             for piece in pieces:
                 rect = self.square_rect(*piece.square).inflate(-6, -6)
                 piece_art.draw_piece(surface, piece.piece_type, piece.color, rect)
+                if piece.frozen:
+                    self._draw_frozen_piece(surface, piece.square)
+                if piece.blessing is not None and not piece.blessing_used:
+                    self._draw_blessing_badge(
+                        surface, piece.square, piece.blessing
+                    )
 
         if portals:
             for marker in portals:
@@ -163,6 +172,54 @@ class BoardView:
 
         if show_coordinates:
             self._draw_coordinates(surface)
+
+    def _draw_frozen_piece(self, surface: pygame.Surface, square: Square) -> None:
+        """Голубой оттенок и снежинка на замороженной фигуре."""
+
+        rect = self.square_rect(*square)
+        overlay = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+        overlay.fill(theme.with_alpha(theme.ICE, 72))
+        surface.blit(overlay, rect.topleft)
+        self._stroke_square(surface, square, theme.ICE, 2)
+
+        center = (rect.left + max(8, rect.w // 5), rect.bottom - max(8, rect.h // 5))
+        arm = max(4, int(self.square_size * 0.13))
+        width = max(1, self.square_size // 34)
+        for dx, dy in ((arm, 0), (arm * 0.5, arm * 0.85), (-arm * 0.5, arm * 0.85)):
+            pygame.draw.line(
+                surface,
+                theme.ICE,
+                (center[0] - dx, center[1] - dy),
+                (center[0] + dx, center[1] + dy),
+                width,
+            )
+        pygame.draw.circle(surface, theme.ICE, center, max(2, width + 1))
+
+    def _draw_blessing_badge(
+        self,
+        surface: pygame.Surface,
+        square: Square,
+        blessing: BlessingType,
+    ) -> None:
+        """Иконка благословения в углу клетки."""
+
+        rect = self.square_rect(*square)
+        size = max(10, int(self.square_size * 0.30))
+        badge_rect = pygame.Rect(
+            rect.right - size - max(2, self.square_size // 24),
+            rect.top + max(2, self.square_size // 24),
+            size,
+            size,
+        )
+        backdrop = pygame.Surface((size + 4, size + 4), pygame.SRCALPHA)
+        pygame.draw.circle(
+            backdrop,
+            (20, 20, 26, 190),
+            (backdrop.get_width() // 2, backdrop.get_height() // 2),
+            size // 2 + 2,
+        )
+        surface.blit(backdrop, (badge_rect.left - 2, badge_rect.top - 2))
+        piece_art.draw_blessing_icon(surface, blessing, badge_rect, theme.ACCENT)
 
     def draw_portal_flash(
         self,
@@ -246,7 +303,33 @@ class BoardView:
         for square, kind in targets.items():
             rect = self.square_rect(*square)
             center = rect.center
-            if kind == "capture":
+            if kind == "bless":
+                self._fill_square(surface, square, theme.ACCENT, 54)
+                self._stroke_square(surface, square, theme.ACCENT, 3)
+                pygame.draw.circle(
+                    surface,
+                    theme.ACCENT,
+                    center,
+                    max(radius + 3, int(self.square_size * 0.28)),
+                    width=max(2, self.square_size // 26),
+                )
+            elif kind == "pass":
+                color = theme.ICE
+                pygame.draw.circle(
+                    surface,
+                    color,
+                    center,
+                    max(radius + 4, int(self.square_size * 0.32)),
+                    width=max(2, self.square_size // 26),
+                )
+                pygame.draw.circle(
+                    surface,
+                    color,
+                    center,
+                    max(2, radius // 2),
+                    width=max(1, self.square_size // 34),
+                )
+            elif kind == "capture":
                 pygame.draw.circle(
                     surface,
                     theme.ACCENT,

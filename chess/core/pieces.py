@@ -9,6 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from enum import Enum
 
+from chess.core.blessings import (
+    BLESSING_INFO,
+    BlessingInfo,
+    BlessingType,
+    blessing_info,
+)
 from chess.core.coords import Square
 
 
@@ -90,12 +96,21 @@ class Piece:
     square: Square
     original_square: Square
     has_moved: bool = False
+    blessing: BlessingType | None = None
+    ever_blessed: bool = False
+    blessing_used: bool = False
 
     def moved_to(self, square: Square) -> "Piece":
         return replace(self, square=square, has_moved=True)
 
     def promoted_to(self, piece_type: PieceType) -> "Piece":
         return replace(self, type=piece_type, has_moved=True)
+
+    def blessed_with(self, blessing: BlessingType) -> "Piece":
+        return replace(self, blessing=blessing, ever_blessed=True, blessing_used=False)
+
+    def blessing_spent(self) -> "Piece":
+        return replace(self, blessing=None, blessing_used=True)
 
     @property
     def is_slider(self) -> bool:
@@ -107,76 +122,14 @@ class Piece:
 
 
 
-class BlessingType(Enum):
-    INVULNERABILITY = "invulnerability"
-    DOUBLE_MOVE = "double_move"
-    RESURRECTION = "resurrection"
-    FREEZE = "freeze"
-    PASS_THROUGH = "pass_through"
-
-
-@dataclass(frozen=True)
-class BlessingInfo:
-    name: str
-    short: str
-    description: str
-    icon: str
-    active: bool
-
-
-BLESSING_INFO: dict[BlessingType, BlessingInfo] = {
-    BlessingType.INVULNERABILITY: BlessingInfo(
-        name="Неуязвимость",
-        short="Одно взятие будет отменено",
-        description=(
-            "Первое взятие фигуры отменяется: атакующая фигура возвращается "
-            "в начало хода, а благословение снимается."
-        ),
-        icon="shield",
-        active=False,
-    ),
-    BlessingType.DOUBLE_MOVE: BlessingInfo(
-        name="Двойной ход",
-        short="Два хода одной фигурой",
-        description=(
-            "Фигура делает два обычных хода за один ход. Можно взять две "
-            "фигуры, но нельзя поставить мат."
-        ),
-        icon="double",
-        active=True,
-    ),
-    BlessingType.RESURRECTION: BlessingInfo(
-        name="Возрождение",
-        short="Один раз после гибели",
-        description=(
-            "Фигура возвращается на клетку, где была взята, в начале "
-            "следующего хода владельца, если клетка свободна."
-        ),
-        icon="resurrection",
-        active=False,
-    ),
-    BlessingType.FREEZE: BlessingInfo(
-        name="Заморозка",
-        short="Стоп соседям на ход",
-        description=(
-            "Ортогонально соседние вражеские фигуры пропускают свой "
-            "следующий ход. Они продолжают атаковать."
-        ),
-        icon="freeze",
-        active=True,
-    ),
-    BlessingType.PASS_THROUGH: BlessingInfo(
-        name="Проход сквозь фигуры",
-        short="Один ход сквозь любые фигуры",
-        description=(
-            "Фигура один раз может пройти сквозь любые фигуры и взять "
-            "только на конечной клетке."
-        ),
-        icon="ghost",
-        active=True,
-    ),
-}
-
-
-def blessing_info(blessing: BlessingType | None) -> BlessingInfo | None:
-    return BLESSING_INFO.get(blessing) if blessing is not None else None
+__all__ = [
+    "BLESSING_INFO",
+    "BlessingInfo",
+    "BlessingType",
+    "Color",
+    "PROMOTION_LETTERS",
+    "PROMOTION_PIECES",
+    "Piece",
+    "PieceType",
+    "blessing_info",
+]

@@ -45,7 +45,7 @@ class SetupScene(Scene):
             font_size=19,
         )
         self.abilities_toggle = Toggle(
-            "Способности короля (этап 5)",
+            "Способности короля",
             self.config.abilities_enabled,
             callback=self._on_abilities_toggle,
             font_size=20,
@@ -294,8 +294,8 @@ class SetupScene(Scene):
                         return
         if self.abilities_toggle.rect.collidepoint(mouse):
             self.tooltip.set(
-                "Способности короля появятся на этапе 5. "
-                "Выбранный параметр сохраняется в состоянии партии.",
+                "Включить благословения короля. Каждая сторона выбирает одну "
+                "из пяти способностей для всех благословлённых фигур.",
                 mouse,
             )
         elif self.hints_toggle.rect.collidepoint(mouse):
@@ -332,7 +332,7 @@ class SetupScene(Scene):
         )
         theme.draw_text(
             surface,
-            "Доски 6×6, 8×8 и 10×10 · порталы уже в игре · способности — этап 5",
+            "Доски 6×6, 8×8 и 10×10 · порталы и благословения короля",
             16,
             theme.TEXT_MUTED,
             (self.margin, 58),
@@ -371,9 +371,8 @@ class SetupScene(Scene):
         self.hints_toggle.draw(surface)
         theme.draw_text(
             surface,
-            "Этап 4: доступны доски 6×6, 8×8 и 10×10, стандартные правила и "
-            "0–3 пары порталов. Способности короля (этап 5) пока только "
-            "сохраняются в настройках.",
+            "Этап 5: доступны доски 6×6, 8×8 и 10×10, стандартные правила, "
+            "0–3 пары порталов и пять благословений короля.",
             14,
             theme.TEXT_DIM,
             self.info_pos,
@@ -411,8 +410,8 @@ class SetupScene(Scene):
         if not self.config.abilities_enabled:
             theme.draw_text(
                 surface,
-                "Выключены. Механика способностей короля появится на этапе 5; "
-                "выбранные параметры уже передаются в состояние партии.",
+                "Выключены. Включите переключатель, чтобы выбрать способность "
+                "короля для белых и чёрных.",
                 14,
                 theme.TEXT_DIM,
                 (self.margin, self.abilities_top + 26),

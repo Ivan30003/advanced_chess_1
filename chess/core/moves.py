@@ -1,14 +1,15 @@
 """Объекты ходов и составного действия (Turn).
 
-На этапе 4 Turn содержит ровно один ход, но уже поддерживает свободный выход
-из портала в начале хода. Поля ``bless`` и ``freeze`` оставлены для будущих
-этапов, чтобы не менять структуру данных.
+Turn описывает одно действие стороны: обычный ход, свободный выход из
+портала, двойной ход благословлённой фигуры, благословение или заморозку.
+Благословение и заморозка не содержат ходов фигур и выполняются вместо хода.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from chess.core.blessings import BlessAction, FreezeAction
 from chess.core.coords import Square
 from chess.core.pieces import Piece, PieceType
 from chess.core.portals import PortalActivation
@@ -57,8 +58,8 @@ class Turn:
 
     moves: list[Move] = field(default_factory=list)
     free_teleport: PortalActivation | None = None
-    bless: object | None = None
-    freeze: object | None = None
+    bless: BlessAction | None = None
+    freeze: FreezeAction | None = None
 
     @classmethod
     def single(cls, move: Move) -> "Turn":
@@ -69,6 +70,18 @@ class Turn:
         if len(self.moves) != 1:
             raise ValueError("Turn должен содержать ровно один основной ход")
         return self.moves[0]
+
+    @property
+    def is_bless(self) -> bool:
+        return self.bless is not None
+
+    @property
+    def is_freeze(self) -> bool:
+        return self.freeze is not None
+
+    @property
+    def is_double_move(self) -> bool:
+        return len(self.moves) == 2
 
     @property
     def portal_activation_count(self) -> int:
@@ -87,6 +100,7 @@ def make_move(
     en_passant: bool = False,
     is_double: bool = False,
     teleport: PortalActivation | None = None,
+    pass_through: bool = False,
 ) -> Move:
     """Удобная фабрика ходов для правил и тестов."""
 
@@ -100,6 +114,7 @@ def make_move(
         en_passant=en_passant,
         is_double=is_double,
         teleport=teleport,
+        pass_through=pass_through,
     )
 
 

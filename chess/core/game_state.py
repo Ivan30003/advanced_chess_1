@@ -9,6 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
+from chess.core.blessings import (
+    BlessAction,
+    BlessingType,
+    FreezeAction,
+    PendingResurrection,
+)
 from chess.core.board import Board
 from chess.core.board_config import BoardConfig, GameConfig
 from chess.core.coords import Square
@@ -149,8 +155,12 @@ class GameState:
     last_move: Move | None = None
     config: GameConfig | None = None
     history_hashes: list[tuple] = field(default_factory=list)
-    pending_resurrections: tuple = ()
+    blessing_choice: dict[Color, BlessingType | None] = field(default_factory=dict)
+    bless_cooldown: dict[Color, int] = field(default_factory=dict)
+    pending_resurrections: list[PendingResurrection] = field(default_factory=list)
     frozen: frozenset[str] = frozenset()
+    freeze_owner: Color | None = None
+    last_cancelled: bool = False
     portals: list[PortalPair] = field(default_factory=list)
     _result: GameResult | None = field(default=None, init=False, repr=False)
     _result_known: bool = field(default=False, init=False, repr=False)
@@ -165,6 +175,18 @@ class GameState:
             self.portals = list(self.portals)
         if self.castling_rights is None:
             self.castling_rights = self.config.board.initial_castling_rights
+        if not isinstance(self.pending_resurrections, list):
+            self.pending_resurrections = list(self.pending_resurrections)
+        if not isinstance(self.frozen, frozenset):
+            self.frozen = frozenset(self.frozen)
+        choices = dict(self.blessing_choice or {})
+        choices.setdefault(Color.WHITE, None)
+        choices.setdefault(Color.BLACK, None)
+        self.blessing_choice = choices
+        cooldowns = dict(self.bless_cooldown or {})
+        cooldowns.setdefault(Color.WHITE, 0)
+        cooldowns.setdefault(Color.BLACK, 0)
+        self.bless_cooldown = cooldowns
         if not self.history_hashes:
             self.history_hashes.append(self.position_hash)
 
@@ -177,21 +199,32 @@ class GameState:
         cls,
         config: GameConfig | BoardConfig | int | None = None,
         rng=None,
+        *,
+        blessing_choice: dict[Color, BlessingType | None] | None = None,
     ) -> "GameState":
         """Начальная позиция выбранного размера (по умолчанию 8×8).
 
         Порталы генерируются после расстановки фигур. ``rng`` принимает
         ``random.Random``, целочисленный seed или ``None``; количество пар
-        берётся из :class:`GameConfig`.
+        берётся из :class:`GameConfig`. ``blessing_choice`` переносит выбор
+        способностей со экрана настройки в состояние партии.
         """
 
         game_config = _resolve_game_config(config)
         board = Board.initial(game_config.board)
         portals = generate_portals(board, game_config.portal_count, rng)
+        chosen = {
+            Color.WHITE: None,
+            Color.BLACK: None,
+        }
+        if game_config.abilities_enabled and blessing_choice:
+            for color in (Color.WHITE, Color.BLACK):
+                chosen[color] = blessing_choice.get(color)
         return cls(
             board=board,
             config=game_config,
             castling_rights=game_config.board.initial_castling_rights,
+            blessing_choice=chosen,
             portals=portals,
         )
 
@@ -207,8 +240,12 @@ class GameState:
             last_move=self.last_move,
             config=self.config,
             history_hashes=list(self.history_hashes),
-            pending_resurrections=self.pending_resurrections,
+            blessing_choice=dict(self.blessing_choice),
+            bless_cooldown=dict(self.bless_cooldown),
+            pending_resurrections=list(self.pending_resurrections),
             frozen=self.frozen,
+            freeze_owner=self.freeze_owner,
+            last_cancelled=self.last_cancelled,
             portals=list(self.portals),
         )
         copy._result = self._result
@@ -243,6 +280,8 @@ class GameState:
             raise ValueError(f"На клетке {activation.entry.name} нет фигуры")
         if piece.color is not state.side_to_move:
             raise ValueError("Свободный выход доступен только фигуре стороны хода")
+        if piece.id in state.frozen:
+            raise ValueError("Замороженная фигура не может выйти из портала")
         if not state.board.is_empty(activation.exit):
             raise ValueError("Выход портала занят")
         state.board.move_piece(activation.entry, activation.exit)
@@ -269,6 +308,8 @@ class GameState:
 
         piece = self.board.piece_at(square)
         if piece is None or piece.color is not self.side_to_move:
+            return None
+        if piece.id in self.frozen:
             return None
         pair = next((item for item in self.portals if item.contains(square)), None)
         if pair is None:
@@ -299,8 +340,23 @@ class GameState:
                     piece.type.value,
                     piece.color.value,
                     piece.id,
+                    piece.blessing.value if piece.blessing is not None else None,
+                    piece.ever_blessed,
+                    piece.blessing_used,
                 )
                 for piece in self.board.pieces.values()
+            )
+        )
+        choices = tuple(
+            (color.value, choice.value if choice is not None else None)
+            for color, choice in sorted(
+                self.blessing_choice.items(), key=lambda item: item[0].value
+            )
+        )
+        cooldowns = tuple(
+            (color.value, value)
+            for color, value in sorted(
+                self.bless_cooldown.items(), key=lambda item: item[0].value
             )
         )
         return (
@@ -310,6 +366,9 @@ class GameState:
             self.en_passant_target.name if self.en_passant_target is not None else None,
             _stable_tuple(self.pending_resurrections),
             tuple(sorted(self.frozen)),
+            self.freeze_owner.value if self.freeze_owner is not None else None,
+            choices,
+            cooldowns,
             _stable_tuple(self.portals),
         )
 
@@ -351,8 +410,14 @@ class GameState:
 
         if self._result_known and self._result is not None and self._result.status.is_finished:
             raise ValueError("Партия уже завершена")
-        if not turn.moves:
+        if not turn.moves and turn.bless is None and turn.freeze is None:
             raise ValueError("Пустой Turn")
+        if turn.bless is not None and turn.freeze is not None:
+            raise ValueError("Благословение и заморозка взаимоисключающи")
+        if (turn.bless is not None or turn.freeze is not None) and turn.moves:
+            raise ValueError("Действие способности не сочетается с ходом фигуры")
+        if len(turn.moves) > 2:
+            raise ValueError("За ход допускается не более двух ходов фигуры")
         if turn.portal_activation_count > 1:
             raise ValueError("За ход разрешена не более одной активации портала")
         if turn.free_teleport is not None and any(
@@ -361,23 +426,99 @@ class GameState:
             raise ValueError(
                 "Свободный выход и телепортация в ходе взаимоисключающи"
             )
+        if len(turn.moves) == 2:
+            first, second = turn.moves
+            if first.piece_id != second.piece_id:
+                raise ValueError("Двойной ход должен выполняться одной фигурой")
+            if first.to_square != second.from_square:
+                raise ValueError("Второй ход должен начинаться с конечной клетки первого")
+
+        if turn.bless is not None:
+            return self._apply_blessing_turn(
+                turn,
+                record_history=record_history,
+                detect_result=detect_result,
+            )
+        if turn.freeze is not None:
+            return self._apply_freeze_turn(
+                turn,
+                record_history=record_history,
+                detect_result=detect_result,
+            )
 
         state = self.copy()
+        state.last_cancelled = False
         rights = set(state.castling_rights or ())
         board_config = state.config.board
+
+        double_piece_id: str | None = None
+        if len(turn.moves) == 2:
+            first_piece = state.board.piece_at(turn.moves[0].from_square)
+            if first_piece is None:
+                raise ValueError("В начале двойного хода нет фигуры")
+            if first_piece.id in state.frozen:
+                raise ValueError("Замороженная фигура не может ходить")
+            if (
+                first_piece.blessing is not BlessingType.DOUBLE_MOVE
+                or first_piece.blessing_used
+            ):
+                raise ValueError("У фигуры нет доступного двойного хода")
+            double_piece_id = first_piece.id
 
         if turn.free_teleport is not None:
             activation = turn.free_teleport
             piece = state.board.piece_at(activation.entry)
             if piece is not None:
+                if piece.id in state.frozen:
+                    raise ValueError("Замороженная фигура не может выйти из портала")
                 _drop_piece_rights(rights, board_config, piece, activation.entry)
             self._apply_free_teleport(state, activation)
             state.en_passant_target = None
 
-        for move in turn.moves:
+        pass_through_used: list[str] = []
+        for index, move in enumerate(turn.moves):
             piece = state.board.piece_at(move.from_square)
             if piece is None:
                 raise ValueError(f"На клетке {move.from_square.name} нет фигуры")
+            if piece.id in state.frozen:
+                raise ValueError("Замороженная фигура не может ходить")
+            if len(turn.moves) == 2:
+                # Каждый под-ход двойного хода проверяется как обычный
+                # легальный ход из промежуточной позиции.
+                from chess.core.rules import generate_legal_moves
+
+                legal_now = generate_legal_moves(state)
+                if not any(_same_move(move, candidate) for candidate in legal_now):
+                    raise ValueError(
+                        f"Под-ход {index + 1} двойного хода нелегален"
+                    )
+
+            if move.pass_through:
+                if piece.blessing is not BlessingType.PASS_THROUGH:
+                    raise ValueError("У фигуры нет доступного прохода сквозь фигуры")
+                if _move_passes_through_piece(state.board, move):
+                    pass_through_used.append(piece.id)
+
+            captured_square = _captured_square(move)
+            victim = (
+                state.board.piece_at(captured_square)
+                if captured_square is not None
+                else None
+            )
+            if (
+                victim is not None
+                and victim.color is not piece.color
+                and victim.blessing is BlessingType.INVULNERABILITY
+            ):
+                return self._cancel_turn_for_invulnerability(
+                    turn,
+                    victim,
+                    record_history=record_history,
+                    detect_result=detect_result,
+                )
+
+            if victim is not None:
+                _note_resurrection(state, victim)
 
             if move.teleport is not None:
                 self._validate_activation(move.teleport)
@@ -395,7 +536,7 @@ class GameState:
 
                 from chess.core.rules import _apply_teleport_to_board
 
-                moved = _apply_teleport_to_board(state.board, piece, move)
+                _apply_teleport_to_board(state.board, piece, move)
                 state.en_passant_target = None
                 is_capture = move.capture is not None
                 state.halfmove_clock = (
@@ -405,12 +546,6 @@ class GameState:
                 )
                 state.last_move = move
                 continue
-
-            captured_square: Square | None = None
-            if move.en_passant:
-                captured_square = Square(move.to_square.file, move.from_square.rank)
-            elif move.capture is not None:
-                captured_square = move.to_square
 
             if captured_square is not None:
                 captured = state.board.piece_at(captured_square)
@@ -457,23 +592,234 @@ class GameState:
             )
             state.last_move = move
 
+        if double_piece_id is not None:
+            _spend_blessing(state, double_piece_id)
+        for piece_id in pass_through_used:
+            _spend_blessing(state, piece_id)
+
         state.castling_rights = frozenset(rights)
+        return self._finish_turn(
+            state,
+            turn,
+            record_history=record_history,
+            detect_result=detect_result,
+            check_double_mate=double_piece_id is not None,
+        )
+
+    # ------------------------------------------------------------------
+    # Действия благословений
+    # ------------------------------------------------------------------
+
+    def _apply_blessing_turn(
+        self,
+        turn: Turn,
+        *,
+        record_history: bool,
+        detect_result: bool,
+    ) -> "GameState":
+        from chess.core.rules import is_in_check
+
+        action: BlessAction = turn.bless  # type: ignore[assignment]
+        color = self.side_to_move
+        if not self.config.abilities_enabled:
+            raise ValueError("Способности короля выключены")
+        choice = self.blessing_choice.get(color)
+        if choice is None:
+            raise ValueError("Способность стороны не выбрана")
+
+        state = self.copy()
+        state.last_cancelled = False
+        rights = set(state.castling_rights or ())
+        if turn.free_teleport is not None:
+            activation = turn.free_teleport
+            piece = state.board.piece_at(activation.entry)
+            if piece is not None:
+                if piece.id in state.frozen:
+                    raise ValueError("Замороженная фигура не может выйти из портала")
+                _drop_piece_rights(rights, state.config.board, piece, activation.entry)
+            self._apply_free_teleport(state, activation)
+            state.en_passant_target = None
+
+        king_square = state.board.king_square(color)
+        if king_square is None:
+            raise ValueError("У стороны нет короля")
+        king = state.board.piece_at(king_square)
+        if king is None or king.id in state.frozen:
+            raise ValueError("Замороженный король не может благословлять")
+        if action.king_square != king_square:
+            raise ValueError("Действие указано не для текущего положения короля")
+        if state.bless_cooldown.get(color, 0) != 0:
+            raise ValueError("Благословение ещё на кулдауне")
+        if is_in_check(state, color):
+            raise ValueError("Нельзя благословлять под шахом")
+
+        if not _is_adjacent(king_square, action.target_square):
+            raise ValueError("Благословлять можно только соседнюю фигуру")
+        target = state.board.piece_at(action.target_square)
+        if (
+            target is None
+            or target.color is not color
+            or target.id != action.target_piece_id
+        ):
+            raise ValueError("Цель благословения должна быть своей фигурой")
+        if target.type is PieceType.KING:
+            raise ValueError("Король не может благословить себя")
+        if target.ever_blessed or target.blessing is not None:
+            raise ValueError("Фигура уже была благословлена")
+
+        state.board.replace_piece(target.blessed_with(choice))
+        state.bless_cooldown[color] = 3
+        state.en_passant_target = None
+        state.halfmove_clock = self.halfmove_clock + 1
+        state.castling_rights = frozenset(rights)
+        state.last_move = None
+        return self._finish_turn(
+            state,
+            turn,
+            record_history=record_history,
+            detect_result=detect_result,
+        )
+
+    def _apply_freeze_turn(
+        self,
+        turn: Turn,
+        *,
+        record_history: bool,
+        detect_result: bool,
+    ) -> "GameState":
+        from chess.core.rules import is_in_check, orthogonal_targets
+
+        action: FreezeAction = turn.freeze  # type: ignore[assignment]
+        color = self.side_to_move
+        if not self.config.abilities_enabled:
+            raise ValueError("Способности короля выключены")
+        if self.blessing_choice.get(color) is not BlessingType.FREEZE:
+            raise ValueError("У стороны не выбрана заморозка")
+
+        state = self.copy()
+        state.last_cancelled = False
+        rights = set(state.castling_rights or ())
+        if turn.free_teleport is not None:
+            activation = turn.free_teleport
+            piece = state.board.piece_at(activation.entry)
+            if piece is not None:
+                if piece.id in state.frozen:
+                    raise ValueError("Замороженная фигура не может выйти из портала")
+                _drop_piece_rights(rights, state.config.board, piece, activation.entry)
+            self._apply_free_teleport(state, activation)
+            state.en_passant_target = None
+
+        source = state.board.piece_at(action.source_square)
+        if (
+            source is None
+            or source.color is not color
+            or source.id != action.source_piece_id
+        ):
+            raise ValueError("Заморозку активирует своя фигура")
+        if source.id in state.frozen:
+            raise ValueError("Замороженная фигура не может активировать способность")
+        if (
+            source.blessing is not BlessingType.FREEZE
+            or source.blessing_used
+        ):
+            raise ValueError("У фигуры нет доступной заморозки")
+        if is_in_check(state, color):
+            raise ValueError("Нельзя замораживать под шахом")
+
+        targets = orthogonal_targets(state.board, source.square, color.opposite)
+        if not targets:
+            raise ValueError("Рядом нет вражеских фигур для заморозки")
+        if action.targets and set(action.targets) != {
+            piece.square for piece in targets
+        }:
+            raise ValueError("Список целей заморозки не соответствует позиции")
+
+        state.frozen = frozenset(piece.id for piece in targets)
+        state.freeze_owner = color
+        state.board.replace_piece(source.blessing_spent())
+        state.en_passant_target = None
+        state.halfmove_clock = self.halfmove_clock + 1
+        state.castling_rights = frozenset(rights)
+        state.last_move = None
+        return self._finish_turn(
+            state,
+            turn,
+            record_history=record_history,
+            detect_result=detect_result,
+        )
+
+    def _cancel_turn_for_invulnerability(
+        self,
+        turn: Turn,
+        victim: Piece,
+        *,
+        record_history: bool,
+        detect_result: bool,
+    ) -> "GameState":
+        from chess.core.rules import is_in_check
+
+        if turn.moves and is_in_check(self, self.side_to_move):
+            raise ValueError(
+                "Взятие неуязвимой фигуры не может вывести из-под шаха: "
+                "ход был бы отменён"
+            )
+
+        state = self.copy()
+        state.last_cancelled = True
+        shielded = state.board.find_piece(victim.id)
+        if shielded is not None:
+            state.board.replace_piece(shielded.blessing_spent())
+
+        if len(turn.moves) == 2:
+            _spend_blessing(state, turn.moves[0].piece_id)
+        for move in turn.moves:
+            if move.pass_through:
+                piece = self.board.find_piece(move.piece_id)
+                if piece is not None and _move_passes_through_piece(self.board, move):
+                    _spend_blessing(state, piece.id)
+
+        state.en_passant_target = None
+        state.halfmove_clock = self.halfmove_clock + 1
+        state.last_move = None
+        return self._finish_turn(
+            state,
+            turn,
+            record_history=record_history,
+            detect_result=detect_result,
+        )
+
+    def _finish_turn(
+        self,
+        state: "GameState",
+        turn: Turn,
+        *,
+        record_history: bool,
+        detect_result: bool,
+        check_double_mate: bool = False,
+    ) -> "GameState":
+        """Завершает ход: очередь, кулдаун, возрождения, журнал и результат."""
+
+        state._result = None
+        state._result_known = False
         state.side_to_move = self.side_to_move.opposite
         if self.side_to_move is Color.BLACK:
             state.turn_number = self.turn_number + 1
 
+        _advance_start_of_turn(state)
         if record_history:
             state.history.append(format_turn(self, turn, state))
+        _process_resurrections(state, record_history=record_history)
 
         # Хеш нужен для повторений, но в perft он не запрашивается.
         if record_history or detect_result:
             state.history_hashes.append(state.position_hash)
 
-        state._result = None
-        state._result_known = False
-        if detect_result:
+        if detect_result and not state._result_known:
             state.result = state.evaluate_result()
-
+        if check_double_mate:
+            result = state.result if state._result_known else state.evaluate_result()
+            if result is not None and result.winner is self.side_to_move:
+                raise ValueError("Двойной ход не может поставить мат")
         return state
 
     # ------------------------------------------------------------------
@@ -642,3 +988,143 @@ def _drop_rook_right(
         rights.discard(king_side)
     elif square == castling.queen_side_rook_from:
         rights.discard(queen_side)
+
+
+def _is_adjacent(first: Square, second: Square) -> bool:
+    return max(abs(first.file - second.file), abs(first.rank - second.rank)) == 1
+
+
+def _same_move(first: Move, second: Move) -> bool:
+    """Совпадают ли ходы по существенным для применения полям."""
+
+    return (
+        first.piece_id == second.piece_id
+        and first.from_square == second.from_square
+        and first.to_square == second.to_square
+        and first.promotion == second.promotion
+        and first.castle == second.castle
+        and first.en_passant == second.en_passant
+        and first.teleport == second.teleport
+        and first.pass_through == second.pass_through
+    )
+
+
+def _captured_square(move: Move) -> Square | None:
+    if move.en_passant:
+        return Square(move.to_square.file, move.from_square.rank)
+    if move.capture is not None:
+        return move.to_square
+    return None
+
+
+def _note_resurrection(state: "GameState", victim: Piece) -> None:
+    if victim.blessing is not BlessingType.RESURRECTION:
+        return
+    if any(item.piece_id == victim.id for item in state.pending_resurrections):
+        return
+    state.pending_resurrections.append(
+        PendingResurrection(
+            piece_id=victim.id,
+            piece_type=victim.type,
+            color=victim.color,
+            original_square=victim.square,
+            turn_created=state.turn_number,
+        )
+    )
+
+
+def _spend_blessing(state: "GameState", piece_id: str) -> None:
+    piece = state.board.find_piece(piece_id)
+    if piece is None or piece.blessing is None:
+        return
+    state.board.replace_piece(piece.blessing_spent())
+
+
+def _segment_crosses_piece(board: Board, origin: Square, target: Square) -> bool:
+    """Есть ли фигура строго между клетками на линии."""
+
+    file_delta = target.file - origin.file
+    rank_delta = target.rank - origin.rank
+    if file_delta == 0 and rank_delta == 0:
+        return False
+    if not (
+        file_delta == 0
+        or rank_delta == 0
+        or abs(file_delta) == abs(rank_delta)
+    ):
+        return False
+    step_file = (file_delta > 0) - (file_delta < 0)
+    step_rank = (rank_delta > 0) - (rank_delta < 0)
+    current = origin
+    while True:
+        current = current.offset(step_file, step_rank)
+        if current is None or current == target:
+            return False
+        if board.piece_at(current) is not None:
+            return True
+
+
+def _move_passes_through_piece(board: Board, move: Move) -> bool:
+    """Прошёл ли фактический путь хода сквозь занятую клетку."""
+
+    if move.teleport is not None:
+        if _segment_crosses_piece(board, move.from_square, move.teleport.entry):
+            return True
+        return _segment_crosses_piece(board, move.teleport.exit, move.to_square)
+    return _segment_crosses_piece(board, move.from_square, move.to_square)
+
+
+def _advance_start_of_turn(state: "GameState") -> None:
+    """Снимает заморозку владельца и уменьшает кулдаун благословения."""
+
+    if state.freeze_owner is not None and state.freeze_owner is state.side_to_move:
+        state.frozen = frozenset()
+        state.freeze_owner = None
+    if state.bless_cooldown.get(state.side_to_move, 0) > 0:
+        state.bless_cooldown[state.side_to_move] -= 1
+
+
+def _process_resurrections(state: "GameState", *, record_history: bool) -> None:
+    """Возвращает отложенные фигуры в начале хода их владельца."""
+
+    color = state.side_to_move
+    pending = [item for item in state.pending_resurrections if item.color is color]
+    if not pending:
+        return
+
+    # Если партия уже завершилась матом или патом, возрождение не спасает.
+    terminal = state.evaluate_result()
+    if terminal is not None:
+        state.pending_resurrections = [
+            item for item in state.pending_resurrections if item.color is not color
+        ]
+        state.result = terminal
+        return
+
+    remaining = [
+        item for item in state.pending_resurrections if item.color is not color
+    ]
+    for item in pending:
+        square = item.original_square
+        if state.board.is_empty(square):
+            piece = Piece(
+                id=item.piece_id,
+                type=item.piece_type,
+                color=item.color,
+                square=square,
+                original_square=square,
+                has_moved=True,
+                blessing=None,
+                ever_blessed=True,
+                blessing_used=False,
+            )
+            state.board.add_piece(piece)
+            if record_history:
+                state.history.append(
+                    f"{item.piece_type.letter}{square.name}: возрождение."
+                )
+        elif record_history:
+            state.history.append(
+                f"Возрождение не состоялось: {square.name} занята."
+            )
+    state.pending_resurrections = remaining

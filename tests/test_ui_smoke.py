@@ -723,6 +723,266 @@ def test_teleport_move_through_click_handler(app: App) -> None:
     assert scene.state.side_to_move is Color.BLACK
 
 
+def _ability_state(
+    pieces,
+    *,
+    white_choice=None,
+    black_choice=None,
+    side: Color = Color.WHITE,
+    frozen: frozenset[str] = frozenset(),
+    freeze_owner: Color | None = None,
+) -> GameState:
+    board = Board.empty(BoardConfig.for_size(8))
+    for piece in pieces:
+        board.add_piece(piece)
+    return GameState(
+        board=board,
+        config=GameConfig.for_size(8, abilities_enabled=True),
+        side_to_move=side,
+        castling_rights=frozenset(),
+        blessing_choice={Color.WHITE: white_choice, Color.BLACK: black_choice},
+        frozen=frozen,
+        freeze_owner=freeze_owner,
+    )
+
+
+def _ability_piece(piece_id, piece_type, color, square_name, **kwargs) -> Piece:
+    return Piece(
+        piece_id,
+        piece_type,
+        color,
+        Square.from_name(square_name),
+        Square.from_name(square_name),
+        **kwargs,
+    )
+
+
+def test_blessing_button_and_mode(app: App) -> None:
+    scene = GameScene(
+        app,
+        SetupConfig(
+            abilities_enabled=True,
+            white_ability=BlessingType.INVULNERABILITY,
+            black_ability=BlessingType.FREEZE,
+        ),
+    )
+    scene._layout()
+    assert scene.state.blessing_choice[Color.WHITE] is BlessingType.INVULNERABILITY
+
+    _click(scene, scene.board_view.square_center(4, 0))  # e1
+    assert scene.selected == Square.from_name("e1")
+    assert scene.bless_button.visible
+    assert scene.bless_button.enabled
+
+    _click(scene, scene.bless_button.rect.center)
+    assert scene.blessing_mode
+    assert Square.from_name("d1") in scene.blessing_targets
+    assert Square.from_name("e2") in scene.blessing_targets
+    surface = pygame.Surface(app.screen.get_size())
+    scene.draw(surface)
+
+    _click(scene, scene.board_view.square_center(3, 0))  # d1
+    assert not scene.blessing_mode
+    queen = scene.state.board.piece_at(Square.from_name("d1"))
+    assert queen is not None and queen.blessing is BlessingType.INVULNERABILITY
+    assert scene.state.bless_cooldown[Color.WHITE] == 3
+    assert scene.state.side_to_move is Color.BLACK
+
+
+def test_blessing_mode_cancelled_by_escape_and_right_click(app: App) -> None:
+    scene = GameScene(
+        app,
+        SetupConfig(
+            abilities_enabled=True,
+            white_ability=BlessingType.FREEZE,
+            black_ability=BlessingType.FREEZE,
+        ),
+    )
+    scene._layout()
+    _click(scene, scene.board_view.square_center(4, 0))
+    _click(scene, scene.bless_button.rect.center)
+    assert scene.blessing_mode
+
+    scene.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE))
+    assert not scene.blessing_mode
+    assert scene.selected == Square.from_name("e1")
+
+    _click(scene, scene.bless_button.rect.center)
+    assert scene.blessing_mode
+    scene.handle_event(
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=3, pos=(0, 0))
+    )
+    assert not scene.blessing_mode
+    assert scene.selected == Square.from_name("e1")
+
+
+def test_blessing_icon_and_frozen_piece_are_rendered(app: App) -> None:
+    scene = GameScene(
+        app,
+        SetupConfig(
+            abilities_enabled=True,
+            white_ability=BlessingType.FREEZE,
+            black_ability=BlessingType.FREEZE,
+        ),
+    )
+    scene.state = _ability_state(
+        [
+            _ability_piece("wK", PieceType.KING, Color.WHITE, "e1"),
+            _ability_piece("bK", PieceType.KING, Color.BLACK, "e8"),
+            _ability_piece(
+                "wR-d4",
+                PieceType.ROOK,
+                Color.WHITE,
+                "d4",
+                blessing=BlessingType.FREEZE,
+                ever_blessed=True,
+            ),
+            _ability_piece("bP-d5", PieceType.PAWN, Color.BLACK, "d5"),
+        ],
+        white_choice=BlessingType.FREEZE,
+        frozen=frozenset({"bP-d5"}),
+        freeze_owner=Color.WHITE,
+    )
+    scene._layout()
+    display = {(piece.square, piece.color): piece for piece in scene._display_pieces()}
+    blessed = display[((3, 3), Color.WHITE)]
+    frozen = display[((3, 4), Color.BLACK)]
+    assert blessed.blessing is BlessingType.FREEZE
+    assert frozen.frozen
+
+    surface = pygame.Surface(app.screen.get_size())
+    scene.draw(surface)
+    frozen_rect = scene.board_view.square_rect(3, 4)
+    assert _count_color(surface, frozen_rect, theme.ICE) > 0
+    blessed_rect = scene.board_view.square_rect(3, 3)
+    assert _count_color(surface, blessed_rect, theme.ACCENT) > 0
+
+
+def test_freeze_ability_button_executes(app: App) -> None:
+    scene = GameScene(
+        app,
+        SetupConfig(
+            abilities_enabled=True,
+            white_ability=BlessingType.FREEZE,
+            black_ability=BlessingType.FREEZE,
+        ),
+    )
+    scene.state = _ability_state(
+        [
+            _ability_piece("wK", PieceType.KING, Color.WHITE, "e1"),
+            _ability_piece("bK", PieceType.KING, Color.BLACK, "e8"),
+            _ability_piece(
+                "wR-d4",
+                PieceType.ROOK,
+                Color.WHITE,
+                "d4",
+                blessing=BlessingType.FREEZE,
+                ever_blessed=True,
+            ),
+            _ability_piece("bP-d5", PieceType.PAWN, Color.BLACK, "d5"),
+            _ability_piece("bP-e4", PieceType.PAWN, Color.BLACK, "e4"),
+        ],
+        white_choice=BlessingType.FREEZE,
+    )
+    scene._layout()
+    _click(scene, scene.board_view.square_center(3, 3))  # d4
+    assert scene.ability_button.visible
+    assert scene.ability_button.enabled
+    assert scene.ability_button.text == "Заморозка"
+
+    _click(scene, scene.ability_button.rect.center)
+    assert scene.state.frozen == {"bP-d5", "bP-e4"}
+    source = scene.state.board.piece_at(Square.from_name("d4"))
+    assert source is not None and source.blessing is None
+    assert scene.state.side_to_move is Color.BLACK
+
+
+def test_double_move_ui_two_clicks(app: App) -> None:
+    scene = GameScene(
+        app,
+        SetupConfig(
+            abilities_enabled=True,
+            white_ability=BlessingType.DOUBLE_MOVE,
+            black_ability=BlessingType.FREEZE,
+        ),
+    )
+    scene.state = _ability_state(
+        [
+            _ability_piece("wK", PieceType.KING, Color.WHITE, "e1"),
+            _ability_piece("bK", PieceType.KING, Color.BLACK, "e8"),
+            _ability_piece(
+                "wR-a1",
+                PieceType.ROOK,
+                Color.WHITE,
+                "a1",
+                blessing=BlessingType.DOUBLE_MOVE,
+                ever_blessed=True,
+            ),
+            _ability_piece("bP-a2", PieceType.PAWN, Color.BLACK, "a2"),
+            _ability_piece("bP-a3", PieceType.PAWN, Color.BLACK, "a3"),
+        ],
+        white_choice=BlessingType.DOUBLE_MOVE,
+    )
+    scene._layout()
+    _click(scene, scene.board_view.square_center(0, 0))  # a1
+    assert scene.ability_button.text == "Двойной ход"
+    _click(scene, scene.ability_button.rect.center)
+    assert scene.double_mode
+    assert Square.from_name("a2") in scene.legal_by_target
+
+    _click(scene, scene.board_view.square_center(0, 1))  # a2
+    assert scene.double_first is not None
+    assert Square.from_name("a3") in scene.legal_by_target
+
+    _click(scene, scene.board_view.square_center(0, 2))  # a3
+    rook = scene.state.board.piece_at(Square.from_name("a3"))
+    assert rook is not None and rook.id == "wR-a1"
+    assert rook.blessing is None and rook.blessing_used
+    assert scene.state.history[-1] == "a1xa2 + a2xa3"
+
+
+def test_pass_through_toggle_ui(app: App) -> None:
+    scene = GameScene(
+        app,
+        SetupConfig(
+            abilities_enabled=True,
+            white_ability=BlessingType.PASS_THROUGH,
+            black_ability=BlessingType.FREEZE,
+        ),
+    )
+    scene.state = _ability_state(
+        [
+            _ability_piece("wK", PieceType.KING, Color.WHITE, "e1"),
+            _ability_piece("bK", PieceType.KING, Color.BLACK, "e8"),
+            _ability_piece(
+                "wR-a1",
+                PieceType.ROOK,
+                Color.WHITE,
+                "a1",
+                blessing=BlessingType.PASS_THROUGH,
+                ever_blessed=True,
+            ),
+            _ability_piece("wP-a2", PieceType.PAWN, Color.WHITE, "a2"),
+            _ability_piece("bP-a4", PieceType.PAWN, Color.BLACK, "a4"),
+        ],
+        white_choice=BlessingType.PASS_THROUGH,
+    )
+    scene._layout()
+    _click(scene, scene.board_view.square_center(0, 0))  # a1
+    assert scene.ability_button.text == "Проход сквозь"
+    assert Square.from_name("a6") not in scene.legal_by_target
+
+    _click(scene, scene.ability_button.rect.center)
+    assert scene.pass_through_mode
+    assert scene.ability_button.text == "Проход: вкл"
+    assert Square.from_name("a6") in scene.legal_by_target
+
+    _click(scene, scene.board_view.square_center(0, 5))  # a6
+    rook = scene.state.board.piece_at(Square.from_name("a6"))
+    assert rook is not None and rook.id == "wR-a1"
+    assert rook.blessing is None and rook.blessing_used
+
+
 def test_core_has_no_pygame_imports() -> None:
     core_dir = Path(__file__).resolve().parents[1] / "chess" / "core"
     for path in core_dir.rglob("*.py"):

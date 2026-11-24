@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
+from chess.core.blessings import BlessAction, BlessingType, FreezeAction
 from chess.core.board import Board
 from chess.core.coords import Square
 from chess.core.moves import Move, Turn, make_move
@@ -75,6 +76,35 @@ def _sign(value: int) -> int:
 
 def _is_slider(piece_type: PieceType) -> bool:
     return piece_type in SLIDER_TYPES
+
+
+def _has_pass_through(piece: Piece) -> bool:
+    return (
+        piece.blessing is BlessingType.PASS_THROUGH
+        and not piece.blessing_used
+    )
+
+
+def _pass_through_slider_attacks(
+    board: Board,
+    square: Square,
+    by_color: Color,
+    frozen: frozenset[str],
+) -> bool:
+    """Атакует ли слон/ладья/ферзь сквозь фигуры благодаря способности."""
+
+    for piece in board.pieces_of(by_color):
+        if piece.id in frozen or not _is_slider(piece.type):
+            continue
+        if not _has_pass_through(piece):
+            continue
+        if _line_is_valid(
+            piece.type,
+            square.file - piece.square.file,
+            square.rank - piece.square.rank,
+        ):
+            return True
+    return False
 
 
 def _directions_for(piece_type: PieceType) -> tuple[tuple[int, int], ...]:
@@ -262,6 +292,7 @@ def _portal_attacks(
     portals: Sequence[PortalPair] | PortalSet,
     *,
     include_king_free_exit: bool = True,
+    frozen: frozenset[str] = frozenset(),
 ) -> bool:
     """Атаки с одной активацией портала."""
 
@@ -272,7 +303,11 @@ def _portal_attacks(
 
             # Фигура на входе свободно выходит на выход и атакует оттуда.
             occupant = board.piece_at(entry)
-            if occupant is not None and occupant.color is by_color:
+            if (
+                occupant is not None
+                and occupant.color is by_color
+                and occupant.id not in frozen
+            ):
                 if occupant.type is PieceType.KING:
                     if include_king_free_exit:
                         trial = board.copy()
@@ -284,6 +319,7 @@ def _portal_attacks(
                             by_color.opposite,
                             portals,
                             include_king_free_exit=False,
+                            frozen=frozen,
                         ) and _attacks_from_square(
                             trial,
                             occupant.type,
@@ -292,6 +328,13 @@ def _portal_attacks(
                             square,
                         ):
                             return True
+                elif _has_pass_through(occupant) and _is_slider(occupant.type):
+                    if _line_is_valid(
+                        occupant.type,
+                        square.file - exit_square.file,
+                        square.rank - exit_square.rank,
+                    ):
+                        return True
                 elif _attacks_from_square(
                     board,
                     occupant.type,
@@ -308,16 +351,32 @@ def _portal_attacks(
             for slider in board.pieces_of(by_color):
                 if not _is_slider(slider.type):
                     continue
+                if slider.id in frozen:
+                    continue
                 if slider.square == entry:
                     continue
-                if not _path_is_clear(
+                pass_through = _has_pass_through(slider)
+                if not pass_through and not _path_is_clear(
                     board,
                     slider.square,
                     entry,
                     slider.type,
                 ):
                     continue
-                if _attacks_from_square(
+                if pass_through and not _line_is_valid(
+                    slider.type,
+                    entry.file - slider.square.file,
+                    entry.rank - slider.square.rank,
+                ):
+                    continue
+                if pass_through:
+                    if _line_is_valid(
+                        slider.type,
+                        square.file - exit_square.file,
+                        square.rank - exit_square.rank,
+                    ):
+                        return True
+                elif _attacks_from_square(
                     board,
                     slider.type,
                     by_color,
@@ -337,10 +396,13 @@ def is_square_attacked(
     portals: Sequence[PortalPair] | PortalSet = (),
     *,
     include_king_free_exit: bool = True,
+    frozen: frozenset[str] = frozenset(),
 ) -> bool:
-    """Атакована ли клетка с учётом порталов."""
+    """Атакована ли клетка с учётом порталов и прохода сквозь фигуры."""
 
     if _is_square_attacked_basic(board, square, by_color):
+        return True
+    if _pass_through_slider_attacks(board, square, by_color, frozen):
         return True
     if not portals:
         return False
@@ -350,6 +412,7 @@ def is_square_attacked(
         by_color,
         portals,
         include_king_free_exit=include_king_free_exit,
+        frozen=frozen,
     )
 
 
@@ -538,6 +601,144 @@ def _sliding_moves(
             break
 
 
+def _pass_through_teleport_continuations(
+    board: Board,
+    piece: Piece,
+    activation: PortalActivation,
+    *,
+    crossed_before: bool,
+) -> Iterable[Move]:
+    """Продолжения телепорта, если фигура может проходить сквозь фигуры."""
+
+    exit_square = activation.exit
+    start_square = piece.square
+    if crossed_before:
+        yield make_move(
+            piece,
+            exit_square,
+            teleport=activation,
+            pass_through=True,
+        )
+
+    for file_delta, rank_delta in _directions_for(piece.type):
+        current = exit_square
+        crossed = crossed_before
+        while True:
+            current = current.offset(file_delta, rank_delta)
+            if current is None or not board.is_on_board(current):
+                break
+            occupant = board.piece_at(current)
+            if current == start_square:
+                occupant = None
+            if occupant is None:
+                if crossed:
+                    yield make_move(
+                        piece,
+                        current,
+                        teleport=activation,
+                        pass_through=True,
+                    )
+                continue
+            if occupant.color is not piece.color:
+                if crossed:
+                    yield make_move(
+                        piece,
+                        current,
+                        capture=occupant,
+                        teleport=activation,
+                        pass_through=True,
+                    )
+            crossed = True
+
+
+def _pass_through_sliding_moves(
+    board: Board,
+    state: "GameState",
+    piece: Piece,
+    *,
+    allow_portal_teleport: bool = True,
+) -> Iterable[Move]:
+    """Ходы сквозь фигуры; обычные пути уже сгенерированы отдельно."""
+
+    for file_delta, rank_delta in _directions_for(piece.type):
+        current = piece.square
+        crossed = False
+        while True:
+            current = current.offset(file_delta, rank_delta)
+            if current is None or not board.is_on_board(current):
+                break
+            occupant = board.piece_at(current)
+            if occupant is None:
+                if crossed:
+                    yield make_move(piece, current, pass_through=True)
+                activation = _activation_at(state, current)
+                if (
+                    allow_portal_teleport
+                    and activation is not None
+                    and board.is_empty(activation.exit)
+                ):
+                    yield from _pass_through_teleport_continuations(
+                        board,
+                        piece,
+                        activation,
+                        crossed_before=crossed,
+                    )
+                continue
+            if occupant.color is not piece.color and crossed:
+                yield make_move(
+                    piece,
+                    current,
+                    capture=occupant,
+                    pass_through=True,
+                )
+            crossed = True
+
+
+def _pass_through_pawn_moves(
+    board: Board,
+    state: "GameState",
+    piece: Piece,
+) -> Iterable[Move]:
+    board_config = state.config.board
+    start_rank = (
+        board_config.white_pawn_rank
+        if piece.color is Color.WHITE
+        else board_config.black_pawn_rank
+    )
+    if piece.has_moved or piece.square.rank != start_rank:
+        return
+    direction = 1 if piece.color is Color.WHITE else -1
+    middle = piece.square.offset(0, direction)
+    target = piece.square.offset(0, direction * 2)
+    if (
+        middle is not None
+        and target is not None
+        and board.is_on_board(target)
+        and board.piece_at(middle) is not None
+        and board.is_empty(target)
+    ):
+        yield make_move(piece, target, is_double=True, pass_through=True)
+
+
+def _pass_through_moves(
+    state: "GameState",
+    piece: Piece,
+    *,
+    allow_portal_teleport: bool = True,
+) -> Iterable[Move]:
+    if not _has_pass_through(piece) or piece.id in state.frozen:
+        return
+    if piece.type is PieceType.PAWN:
+        yield from _pass_through_pawn_moves(state.board, state, piece)
+    elif _is_slider(piece.type):
+        yield from _pass_through_sliding_moves(
+            state.board,
+            state,
+            piece,
+            allow_portal_teleport=allow_portal_teleport,
+        )
+
+
 def _step_moves(
     board: Board,
     piece: Piece,
@@ -597,6 +798,7 @@ def _castle_moves(board: Board, state: "GameState", piece: Piece) -> Iterable[Mo
                 square,
                 opponent,
                 state.portals,
+                frozen=state.frozen,
             )
             for square in safe_squares
         ):
@@ -617,13 +819,16 @@ def generate_pseudo_moves(
 ) -> list[Move]:
     """Все ходы фигуры без фильтрации по безопасности короля."""
 
+    if piece.id in state.frozen:
+        return []
+
     board = state.board
     if piece.type is PieceType.PAWN:
-        return list(_pawn_moves(board, state, piece))
-    if piece.type is PieceType.KNIGHT:
-        return list(_step_moves(board, piece, KNIGHT_OFFSETS))
-    if piece.type is PieceType.BISHOP:
-        return list(
+        moves = list(_pawn_moves(board, state, piece))
+    elif piece.type is PieceType.KNIGHT:
+        moves = list(_step_moves(board, piece, KNIGHT_OFFSETS))
+    elif piece.type is PieceType.BISHOP:
+        moves = list(
             _sliding_moves(
                 board,
                 state,
@@ -632,8 +837,8 @@ def generate_pseudo_moves(
                 allow_portal_teleport=allow_portal_teleport,
             )
         )
-    if piece.type is PieceType.ROOK:
-        return list(
+    elif piece.type is PieceType.ROOK:
+        moves = list(
             _sliding_moves(
                 board,
                 state,
@@ -642,8 +847,8 @@ def generate_pseudo_moves(
                 allow_portal_teleport=allow_portal_teleport,
             )
         )
-    if piece.type is PieceType.QUEEN:
-        return list(
+    elif piece.type is PieceType.QUEEN:
+        moves = list(
             _sliding_moves(
                 board,
                 state,
@@ -652,11 +857,21 @@ def generate_pseudo_moves(
                 allow_portal_teleport=allow_portal_teleport,
             )
         )
-    if piece.type is PieceType.KING:
-        return list(_step_moves(board, piece, KING_OFFSETS)) + list(
+    elif piece.type is PieceType.KING:
+        moves = list(_step_moves(board, piece, KING_OFFSETS)) + list(
             _castle_moves(board, state, piece)
         )
-    return []
+    else:
+        moves = []
+
+    moves.extend(
+        _pass_through_moves(
+            state,
+            piece,
+            allow_portal_teleport=allow_portal_teleport,
+        )
+    )
+    return moves
 
 
 # ---------------------------------------------------------------------------
@@ -685,11 +900,16 @@ def _apply_teleport_to_board(board: Board, piece: Piece, move: Move) -> Piece:
         raise ValueError("Вход портала должен быть пустым")
     if not board.is_empty(exit_square):
         raise ValueError("Выход портала должен быть пустым")
-    if not _path_is_clear(board, move.from_square, entry, piece.type):
+    if not move.pass_through and not _path_is_clear(
+        board,
+        move.from_square,
+        entry,
+        piece.type,
+    ):
         raise ValueError("Путь до входа портала заблокирован")
 
     if move.to_square != exit_square:
-        if not _path_is_clear(
+        if not move.pass_through and not _path_is_clear(
             board,
             exit_square,
             move.to_square,
@@ -762,6 +982,7 @@ def _keeps_king_safe(
     move: Move,
     color: Color,
     portals: Sequence[PortalPair] | PortalSet = (),
+    frozen: frozenset[str] = frozenset(),
 ) -> bool:
     trial = board.copy()
     moved = _apply_move_to_board(trial, move)
@@ -773,12 +994,53 @@ def _keeps_king_safe(
         king_square,
         color.opposite,
         portals,
+        frozen=frozen,
     )
 
 
 # ---------------------------------------------------------------------------
 # Легальные ходы и действия
 # ---------------------------------------------------------------------------
+
+
+def _captured_piece(board: Board, move: Move) -> Piece | None:
+    """Фигура, которую берёт ход (с учётом взятия на проходе)."""
+
+    if move.en_passant:
+        return board.piece_at(Square(move.to_square.file, move.from_square.rank))
+    if move.capture is not None:
+        return board.piece_at(move.to_square)
+    return None
+
+
+def _is_shielded_capture(board: Board, move: Move) -> bool:
+    """Приводит ли ход к срабатыванию чужой неуязвимости."""
+
+    victim = _captured_piece(board, move)
+    return (
+        victim is not None
+        and victim.blessing is BlessingType.INVULNERABILITY
+    )
+
+
+def _move_keeps_king_safe(
+    state: "GameState",
+    move: Move,
+    color: Color,
+) -> bool:
+    """Легален ли ход с учётом возможной отмены неуязвимостью."""
+
+    if _is_shielded_capture(state.board, move):
+        # Взятие отменяется целиком, поэтому позиция остаётся исходной.
+        # Ход допустим, только если король и так не под шахом.
+        return not is_in_check(state, color)
+    return _keeps_king_safe(
+        state.board,
+        move,
+        color,
+        state.portals,
+        state.frozen,
+    )
 
 
 def generate_legal_moves(state: "GameState") -> list[Move]:
@@ -800,96 +1062,356 @@ def generate_legal_moves(state: "GameState") -> list[Move]:
         king_square,
         color.opposite,
         state.portals,
+        frozen=state.frozen,
     )
-    # При порталах обычная эвристика связок может пропустить линию атаки
-    # через портал, поэтому проверяем безопасность каждого хода.
+    # Порталы и проход сквозь фигуры ломают обычную эвристику связок,
+    # поэтому в таких позициях проверяем безопасность каждого хода.
+    enemy_pass_through = any(
+        piece.color is color.opposite
+        and piece.id not in state.frozen
+        and _has_pass_through(piece)
+        for piece in board.pieces_of(color.opposite)
+    )
     pinned = (
         set()
-        if in_check or has_portals
+        if in_check or has_portals or enemy_pass_through
         else _pinned_squares(board, king_square, color)
     )
 
     legal: list[Move] = []
     for piece in board.pieces_of(color):
+        if piece.id in state.frozen:
+            continue
         for move in generate_pseudo_moves(state, piece):
-            if move.castle is not None and not has_portals:
+            if (
+                move.castle is not None
+                and not has_portals
+                and not enemy_pass_through
+                and not in_check
+            ):
                 # Путь и конечная клетка уже проверены при генерации.
                 legal.append(move)
                 continue
             needs_test = (
                 has_portals
+                or enemy_pass_through
                 or in_check
                 or piece.type is PieceType.KING
                 or move.en_passant
                 or move.teleport is not None
+                or move.pass_through
                 or piece.square in pinned
+                or _is_shielded_capture(board, move)
             )
-            if not needs_test or _keeps_king_safe(
-                board,
-                move,
-                color,
-                state.portals,
-            ):
+            if not needs_test or _move_keeps_king_safe(state, move, color):
                 legal.append(move)
     return legal
+
+
+def _free_exit_previews(
+    state: "GameState",
+) -> list[tuple[PortalActivation, "GameState"]]:
+    """Допустимые свободные выходы и состояния после них."""
+
+    color = state.side_to_move
+    result: list[tuple[PortalActivation, "GameState"]] = []
+    for pair in state.portals:
+        for entry in (pair.a, pair.b):
+            activation = state.free_exit_activation(entry)
+            if activation is None:
+                continue
+            piece = state.board.piece_at(entry)
+            if piece is None:  # pragma: no cover - защита
+                continue
+            if (
+                piece.type is PieceType.KING
+                and is_square_attacked(
+                    state.board,
+                    activation.exit,
+                    color.opposite,
+                    state.portals,
+                    frozen=state.frozen,
+                )
+            ):
+                continue
+            result.append((activation, state.preview_free_exit(activation)))
+    return result
 
 
 def _free_exit_turns(state: "GameState") -> list[Turn]:
     """Действия со свободным выходом в начале хода."""
 
     color = state.side_to_move
-    board = state.board
     turns: list[Turn] = []
 
-    for pair in state.portals:
-        for entry, exit_square in ((pair.a, pair.b), (pair.b, pair.a)):
-            piece = board.piece_at(entry)
-            if piece is None or piece.color is not color:
+    for activation, preview in _free_exit_previews(state):
+        moved_piece = preview.board.piece_at(activation.exit)
+        if moved_piece is None:  # pragma: no cover - защита
+            continue
+        for move in generate_pseudo_moves(
+            preview,
+            moved_piece,
+            allow_portal_teleport=False,
+        ):
+            if move.teleport is not None or move.castle is not None:
+                # После выхода фигура уже считалась двигавшейся.
                 continue
-            if not board.is_empty(exit_square):
+            if not _move_keeps_king_safe(preview, move, color):
                 continue
+            turns.append(Turn(free_teleport=activation, moves=[move]))
+    return turns
 
-            activation = PortalActivation(pair.id, entry, exit_square)
-            preview = state.preview_free_exit(activation)
 
-            if piece.type is PieceType.KING and is_square_attacked(
-                preview.board,
-                exit_square,
-                color.opposite,
-                preview.portals,
-            ):
-                # Король не может выйти на атакованную клетку.
-                continue
+# ---------------------------------------------------------------------------
+# Действия благословений
+# ---------------------------------------------------------------------------
 
-            moved_piece = preview.board.piece_at(exit_square)
-            if moved_piece is None:  # pragma: no cover - защита
-                continue
-            for move in generate_pseudo_moves(
-                preview,
-                moved_piece,
-                allow_portal_teleport=False,
-            ):
-                if move.teleport is not None or move.castle is not None:
-                    # После выхода фигура уже считалась двигавшейся.
-                    continue
-                if not _keeps_king_safe(
-                    preview.board,
-                    move,
-                    color,
-                    preview.portals,
-                ):
-                    continue
-                turns.append(
-                    Turn(free_teleport=activation, moves=[move])
+
+def orthogonal_targets(
+    board: Board,
+    square: Square,
+    color: Color,
+) -> list[Piece]:
+    """Вражеские фигуры, ортогонально соседние с клеткой ``square``."""
+
+    targets: list[Piece] = []
+    for file_delta, rank_delta in ORTHOGONAL_DIRECTIONS:
+        current = square.offset(file_delta, rank_delta)
+        if current is None or not board.is_on_board(current):
+            continue
+        piece = board.piece_at(current)
+        if piece is not None and piece.color is color:
+            targets.append(piece)
+    targets.sort(key=lambda item: (item.square.file, item.square.rank))
+    return targets
+
+
+def legal_bless_targets(state: "GameState") -> list[Piece]:
+    """Свои фигуры, которых король может благословить прямо сейчас."""
+
+    if not state.config.abilities_enabled:
+        return []
+    color = state.side_to_move
+    if state.blessing_choice.get(color) is None:
+        return []
+    if state.bless_cooldown.get(color, 0) != 0:
+        return []
+    king_square = state.board.king_square(color)
+    if king_square is None:
+        return []
+    king = state.board.piece_at(king_square)
+    if king is None or king.id in state.frozen:
+        return []
+    if is_in_check(state, color):
+        return []
+
+    targets: list[Piece] = []
+    for file_delta, rank_delta in KING_OFFSETS:
+        current = king_square.offset(file_delta, rank_delta)
+        if current is None or not state.board.is_on_board(current):
+            continue
+        piece = state.board.piece_at(current)
+        if (
+            piece is None
+            or piece.color is not color
+            or piece.type is PieceType.KING
+            or piece.ever_blessed
+            or piece.blessing is not None
+        ):
+            continue
+        targets.append(piece)
+    targets.sort(key=lambda item: (item.square.file, item.square.rank))
+    return targets
+
+
+def _bless_turns(
+    state: "GameState",
+    free: PortalActivation | None = None,
+) -> list[Turn]:
+    color = state.side_to_move
+    choice = state.blessing_choice.get(color)
+    if choice is None or not state.config.abilities_enabled:
+        return []
+    if state.bless_cooldown.get(color, 0) != 0:
+        return []
+    king_square = state.board.king_square(color)
+    if king_square is None:
+        return []
+    return [
+        Turn(
+            bless=BlessAction(king_square, target.square, target.id),
+            free_teleport=free,
+        )
+        for target in legal_bless_targets(state)
+    ]
+
+
+def _freeze_turns(
+    state: "GameState",
+    free: PortalActivation | None = None,
+) -> list[Turn]:
+    color = state.side_to_move
+    if (
+        not state.config.abilities_enabled
+        or state.blessing_choice.get(color) is not BlessingType.FREEZE
+    ):
+        return []
+    if is_in_check(state, color):
+        return []
+
+    turns: list[Turn] = []
+    for piece in state.board.pieces_of(color):
+        if piece.id in state.frozen:
+            continue
+        if (
+            piece.blessing is not BlessingType.FREEZE
+            or piece.blessing_used
+        ):
+            continue
+        targets = orthogonal_targets(
+            state.board,
+            piece.square,
+            color.opposite,
+        )
+        if not targets:
+            continue
+        turns.append(
+            Turn(
+                freeze=FreezeAction(
+                    piece.square,
+                    piece.id,
+                    tuple(target.square for target in targets),
+                ),
+                free_teleport=free,
+            )
+        )
+    return turns
+
+
+def _preview_after_move(state: "GameState", move: Move) -> "GameState":
+    """Копия состояния после хода без смены стороны и счётчиков."""
+
+    preview = state.copy()
+    piece = preview.board.piece_at(move.from_square)
+    if piece is None:  # pragma: no cover - защита
+        return preview
+    moved = _apply_move_to_board(preview.board, move)
+    if (
+        moved.type is PieceType.PAWN
+        and abs(move.to_square.rank - move.from_square.rank) == 2
+    ):
+        preview.en_passant_target = Square(
+            move.from_square.file,
+            (move.from_square.rank + move.to_square.rank) // 2,
+        )
+    else:
+        preview.en_passant_target = None
+    preview.last_move = move
+    return preview
+
+
+def _has_any_legal_turn(state: "GameState") -> bool:
+    """Есть ли у стороны хоть одно действие (без проверки мата двойным ходом)."""
+
+    if generate_legal_moves(state):
+        return True
+    if _free_exit_turns(state):
+        return True
+    if _bless_turns(state):
+        return True
+    if _freeze_turns(state):
+        return True
+    if _double_move_turns(state, prohibit_mate=False):
+        return True
+    for activation, preview in _free_exit_previews(state):
+        if _bless_turns(preview, activation):
+            return True
+        if _freeze_turns(preview, activation):
+            return True
+        if _double_move_turns(preview, activation, prohibit_mate=False):
+            return True
+    return False
+
+
+def _double_move_turns(
+    state: "GameState",
+    free: PortalActivation | None = None,
+    *,
+    prohibit_mate: bool = True,
+) -> list[Turn]:
+    color = state.side_to_move
+    if (
+        not state.config.abilities_enabled
+        or state.blessing_choice.get(color) is not BlessingType.DOUBLE_MOVE
+    ):
+        return []
+
+    board = state.board
+    candidates = [
+        piece
+        for piece in board.pieces_of(color)
+        if piece.id not in state.frozen
+        and piece.blessing is BlessingType.DOUBLE_MOVE
+        and not piece.blessing_used
+    ]
+    if not candidates:
+        return []
+
+    legal_moves = generate_legal_moves(state)
+    turns: list[Turn] = []
+    for piece in candidates:
+        first_moves = [
+            move
+            for move in legal_moves
+            if move.piece_id == piece.id
+            and not _is_shielded_capture(board, move)
+            and not (free is not None and move.teleport is not None)
+        ]
+        for first in first_moves:
+            preview = _preview_after_move(state, first)
+            second_moves = [
+                move
+                for move in generate_legal_moves(preview)
+                if move.piece_id == piece.id
+                and move.from_square == first.to_square
+                and not _is_shielded_capture(preview.board, move)
+                and not (
+                    (free is not None or first.teleport is not None)
+                    and move.teleport is not None
                 )
+            ]
+            for second in second_moves:
+                turn = Turn(
+                    free_teleport=free,
+                    moves=[first, second],
+                )
+                if prohibit_mate:
+                    final = _preview_after_move(preview, second)
+                    final.side_to_move = color.opposite
+                    if is_in_check(final, color.opposite) and not _has_any_legal_turn(
+                        final
+                    ):
+                        continue
+                turns.append(turn)
     return turns
 
 
 def generate_legal_turns(state: "GameState") -> list[Turn]:
-    """Все легальные действия стороны, включая свободный выход из портала."""
+    """Все легальные действия стороны.
+
+    Включает обычные ходы, свободный выход из портала, благословение,
+    заморозку и двойной ход благословлённых фигур.
+    """
 
     turns = [Turn.single(move) for move in generate_legal_moves(state)]
     turns.extend(_free_exit_turns(state))
+    turns.extend(_bless_turns(state))
+    turns.extend(_freeze_turns(state))
+    turns.extend(_double_move_turns(state))
+    for activation, preview in _free_exit_previews(state):
+        turns.extend(_bless_turns(preview, activation))
+        turns.extend(_freeze_turns(preview, activation))
+        turns.extend(_double_move_turns(preview, activation))
     return turns
 
 
@@ -907,6 +1429,7 @@ def is_in_check(state: "GameState", color: Color) -> bool:
         king_square,
         color.opposite,
         state.portals,
+        frozen=state.frozen,
     )
 
 
